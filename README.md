@@ -984,3 +984,111 @@ You can also make it stricter if it still trades during weak market conditions:
 ```powershell
 python -m scripts.compare_strategies --market-data-source production --source db --limit 50000 --train-ratio 0.7 --timeframes 5m,15m --regime-min-slope-pct 0.06 --regime-min-ema-gap-pct 0.1 --top 10 --export-json reports/strategy_comparison_v20_regime_strict_50000.json --export-csv reports/strategy_comparison_v20_regime_strict_50000.csv
 ```
+
+## V22 non-price market features
+
+### Why this exists
+
+V16–V20 optimized, regime-gated, and walk-forward-validated several
+**price-only** (OHLC) strategies — EMA/RSI, regime-filtered EMA/RSI, breakout
+momentum, and mean reversion. None of them showed a validated edge: across the
+50,000-candle production set they all lost to the `no_trade` benchmark after
+fees, and per-regime analysis (V21) found no profit-factor-above-1 cell
+anywhere. The honest conclusion was that the problem is the **information set**,
+not the parameters. V22 changes the information instead of re-tuning the same
+candles: it adds a research layer for non-price market features (order-flow and
+volume) and tests whether they predict forward returns.
+
+V22 does not add live trading. Everything here is paper/research only.
+
+### What is historical vs only available going forward
+
+This distinction is the whole point, so the code refuses to blur it:
+
+| Feature | Source | Historical? |
+| --- | --- | --- |
+| `volume`, `quote_volume` | Binance klines | Yes |
+| `taker_buy_base_volume`, `taker_buy_quote_volume`, `taker_buy_ratio` | Binance klines (fields 7/9/10) | Yes |
+| volume-spike ratio, candle body %, upper/lower wick % | derived from OHLC | Yes |
+| `order_book_bid_volume`, `order_book_ask_volume`, `order_book_imbalance`, `spread_pct` | Binance `/depth` snapshot | **No — current snapshot only** |
+
+Binance REST serves only the **current** order book, never historical books. So
+order-book columns are **NULL for every historical row**, and nothing in V22
+fabricates them from price. `build_market_features --with-current-order-book`
+can capture a single live snapshot and print its imbalance/spread, but that data
+is explicitly forward-only and is **not** written to historical rows. Collecting
+a real forward-looking order-book dataset is a separate future task.
+
+### Storage
+
+Migration `003_market_features.sql` adds the `market_features` table
+(unique on `exchange, symbol, timeframe, close_time`). Apply it with:
+
+```powershell
+python -m scripts.apply_migrations
+```
+
+### Step 1 — generate features
+
+Loads candles from the DB, derives volume features, fetches taker/quote volumes
+from Binance klines, and inserts feature rows. Order-book columns stay NULL.
+
+```powershell
+python -m scripts.build_market_features --market-data-source production --source db --limit 50000 --timeframes 5m,15m
+```
+
+Add `--with-current-order-book` to also log a single forward-only depth snapshot,
+or `--no-taker` to store volume/price features only. Logs report source candles
+loaded, features generated, taker availability, rows inserted, and which fields
+are unavailable.
+
+### Step 2 — analyze predictive value
+
+For each timeframe and feature, computes the correlation and quantile-bucket
+forward-return profile over the next 1, 3, and 6 candles (average forward
+return, win rate, and sample size per bucket).
+
+```powershell
+python -m scripts.analyze_market_features --market-data-source production --source db --limit 50000 --timeframes 5m,15m --export-json reports/feature_analysis_v22_50000.json --export-csv reports/feature_analysis_v22_50000.csv
+```
+
+Order-book features report `sample_size 0` / "no historical data" instead of a
+fabricated number.
+
+### Step 3 — compare a feature-filtered strategy
+
+`feature_filtered_ema_rsi_v22` wraps the EMA/RSI baseline and allows a BUY only
+when feature rules pass. The volume-spike rule works historically; the
+taker / order-book / spread rules are optional and skip when their data is
+missing, or — if marked **required** — raise a clear `FeatureUnavailableError`
+rather than silently pretending. Requiring order-book data on a historical
+backtest is therefore a configuration error by design.
+
+```powershell
+python -m scripts.compare_strategies --market-data-source production --source db --limit 50000 --train-ratio 0.7 --timeframes 5m,15m --export-json reports/strategy_comparison_v22_50000.json --export-csv reports/strategy_comparison_v22_50000.csv
+```
+
+It is compared against `no_trade`, `buy_hold_order_sized`,
+`ema_rsi_v17_best_region`, `regime_filtered_ema_rsi_v20`, `mean_reversion_v1`,
+and `breakout_momentum_v1`.
+
+### Did any feature show predictive value? No.
+
+On the 50,000-candle production set (5m and 15m), every **historically
+available** feature was statistically indistinguishable from noise:
+
+- Pearson correlations with forward returns (1/3/6 candles) all fell within
+  roughly **[-0.05, +0.05]**.
+- Quantile-bucket win rates clustered around **0.48–0.52** (coin-flip), and the
+  spread between best- and worst-bucket average forward return was hundredths of
+  a percent — far below the ~0.24% round-trip cost.
+- `taker_buy_ratio` showed a faint positive tilt in its top bucket at the 3–6
+  candle horizon on 5m, but well within noise and nowhere near covering costs.
+- `feature_filtered_ema_rsi_v22` did not beat `no_trade` in any meaningful way:
+  the volume-spike gate mostly suppresses trading, and its lone validation-set
+  trade was a single round trip (profit factor undefined) — noise, not an edge.
+
+The features that might actually carry order-flow signal — order-book imbalance
+and spread — **cannot be tested historically** and would require building a
+forward-looking dataset first. That, not another OHLC permutation, is the honest
+next step.

@@ -81,6 +81,68 @@ class BinanceRestClient:
             raise ValueError(f"Unexpected Binance kline response: {data!r}")
         return data
 
+    async def get_historical_klines(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        limit: int,
+    ) -> list[list[Any]]:
+        """Page raw klines backwards and return up to `limit` rows oldest->newest.
+
+        Unlike get_historical_closed_candles this returns the RAW Binance rows so
+        callers can read taker-buy / quote-volume fields (indexes 7, 9, 10) that
+        the Candle model does not carry. The currently-forming candle may be
+        included; downstream bucket alignment drops incomplete buckets anyway.
+        """
+        if limit <= 0:
+            return []
+
+        remaining = limit
+        end_time_ms: int | None = None
+        by_open_time: dict[int, list[Any]] = {}
+
+        while remaining > 0:
+            request_limit = min(remaining + 1, 1000)
+            raw_klines = await self.get_klines(
+                symbol=symbol,
+                interval=interval,
+                limit=request_limit,
+                end_time_ms=end_time_ms,
+            )
+            if not raw_klines:
+                break
+
+            for item in raw_klines:
+                by_open_time[int(item[0])] = item
+
+            oldest_open_time_ms = int(raw_klines[0][0])
+            next_end_time_ms = oldest_open_time_ms - 1
+            if end_time_ms is not None and next_end_time_ms >= end_time_ms:
+                break
+
+            end_time_ms = next_end_time_ms
+            remaining = limit - len(by_open_time)
+
+        ordered = [by_open_time[key] for key in sorted(by_open_time)]
+        return ordered[-limit:]
+
+    async def get_order_book(self, *, symbol: str, limit: int = 100) -> dict[str, Any]:
+        """Fetch the CURRENT order book depth snapshot.
+
+        FORWARD-ONLY: Binance serves only the live book, never historical books.
+        The result must not be attached to past candles.
+        """
+        response = await self.client.get(
+            f"{self.base_url}/v3/depth",
+            params={"symbol": symbol.upper(), "limit": limit},
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"Unexpected Binance depth response: {data!r}")
+        return data
+
     async def get_closed_candles(
         self,
         *,

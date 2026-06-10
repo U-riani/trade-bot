@@ -5,6 +5,7 @@ from decimal import Decimal
 import orjson
 
 from app.execution.models import OrderResult, PortfolioSnapshot
+from app.market.features import MarketFeatures
 from app.market.models import Candle
 from app.risk.models import RiskDecision
 from app.storage.db import Database
@@ -215,8 +216,131 @@ class TradingRepository:
         )
         return int(value or 0)
 
+    async def insert_market_features(self, rows: list[MarketFeatures]) -> int:
+        """Insert feature rows, skipping duplicates by (exchange, symbol, timeframe, close_time).
+
+        Returns the number of NEW rows actually inserted. The count is derived
+        from a before/after table count because ON CONFLICT DO NOTHING does not
+        report per-row insert status through executemany; this is fine for the
+        single-writer research workflow.
+        """
+        if not rows:
+            return 0
+
+        pool = self.db.require_pool()
+        before = int(await pool.fetchval("SELECT COUNT(*) FROM market_features") or 0)
+        await pool.executemany(
+            """
+            INSERT INTO market_features(
+                exchange, symbol, timeframe, open_time, close_time, close_price, volume,
+                quote_volume, taker_buy_base_volume, taker_buy_quote_volume, taker_buy_ratio,
+                order_book_bid_volume, order_book_ask_volume, order_book_imbalance, spread_pct
+            )
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            ON CONFLICT (exchange, symbol, timeframe, close_time) DO NOTHING
+            """,
+            [
+                (
+                    row.exchange,
+                    row.symbol,
+                    row.timeframe,
+                    row.open_time,
+                    row.close_time,
+                    row.close_price,
+                    row.volume,
+                    row.quote_volume,
+                    row.taker_buy_base_volume,
+                    row.taker_buy_quote_volume,
+                    row.taker_buy_ratio,
+                    row.order_book_bid_volume,
+                    row.order_book_ask_volume,
+                    row.order_book_imbalance,
+                    row.spread_pct,
+                )
+                for row in rows
+            ],
+        )
+        after = int(await pool.fetchval("SELECT COUNT(*) FROM market_features") or 0)
+        return after - before
+
+    async def load_market_features(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+    ) -> list[MarketFeatures]:
+        if limit <= 0:
+            return []
+
+        pool = self.db.require_pool()
+        rows = await pool.fetch(
+            """
+            SELECT exchange, symbol, timeframe, open_time, close_time, close_price, volume,
+                   quote_volume, taker_buy_base_volume, taker_buy_quote_volume, taker_buy_ratio,
+                   order_book_bid_volume, order_book_ask_volume, order_book_imbalance, spread_pct
+            FROM market_features
+            WHERE exchange = $1 AND symbol = $2 AND timeframe = $3
+            ORDER BY close_time DESC
+            LIMIT $4
+            """,
+            exchange,
+            symbol,
+            timeframe,
+            limit,
+        )
+
+        def _opt_float(value: object) -> float | None:
+            return None if value is None else float(value)  # type: ignore[arg-type]
+
+        features = [
+            MarketFeatures(
+                exchange=row["exchange"],
+                symbol=row["symbol"],
+                timeframe=row["timeframe"],
+                open_time=row["open_time"],
+                close_time=row["close_time"],
+                close_price=float(row["close_price"]),
+                volume=float(row["volume"]),
+                quote_volume=_opt_float(row["quote_volume"]),
+                taker_buy_base_volume=_opt_float(row["taker_buy_base_volume"]),
+                taker_buy_quote_volume=_opt_float(row["taker_buy_quote_volume"]),
+                taker_buy_ratio=_opt_float(row["taker_buy_ratio"]),
+                order_book_bid_volume=_opt_float(row["order_book_bid_volume"]),
+                order_book_ask_volume=_opt_float(row["order_book_ask_volume"]),
+                order_book_imbalance=_opt_float(row["order_book_imbalance"]),
+                spread_pct=_opt_float(row["spread_pct"]),
+            )
+            for row in rows
+        ]
+        features.reverse()
+        return features
+
+    async def count_market_features(self, *, exchange: str, symbol: str, timeframe: str) -> int:
+        pool = self.db.require_pool()
+        value = await pool.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM market_features
+            WHERE exchange = $1 AND symbol = $2 AND timeframe = $3
+            """,
+            exchange,
+            symbol,
+            timeframe,
+        )
+        return int(value or 0)
+
     async def count_table(self, table_name: str) -> int:
-        allowed = {"candles", "signals", "risk_decisions", "orders", "positions", "bot_events"}
+        allowed = {
+            "candles",
+            "signals",
+            "risk_decisions",
+            "orders",
+            "positions",
+            "bot_events",
+            "market_features",
+        }
         if table_name not in allowed:
             raise ValueError(f"Unsupported table: {table_name}")
         pool = self.db.require_pool()

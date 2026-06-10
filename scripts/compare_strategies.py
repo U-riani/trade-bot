@@ -31,6 +31,7 @@ from app.market.models import Candle
 from app.strategy.base import Strategy
 from app.strategy.breakout_momentum import BreakoutMomentumStrategy
 from app.strategy.ema_rsi import EmaRsiStrategy
+from app.strategy.feature_filtered import FeatureFilteredStrategy
 from app.strategy.market_regime import MarketRegimeFilteredStrategy
 from app.strategy.mean_reversion import MeanReversionStrategy
 from scripts.backtest_strategy import _decimal_to_str, _load_candles, _resolve_market_data_source
@@ -165,6 +166,18 @@ def _parser() -> argparse.ArgumentParser:
         help="Mean-reversion oversold RSI ceiling for entries. Use <=0 to disable.",
     )
     parser.add_argument(
+        "--feature-volume-spike-lookback",
+        type=int,
+        default=20,
+        help="V22 feature filter: lookback for the volume-spike ratio.",
+    )
+    parser.add_argument(
+        "--feature-min-volume-spike",
+        type=float,
+        default=1.2,
+        help="V22 feature filter: require latest volume >= this multiple of recent average to BUY.",
+    )
+    parser.add_argument(
         "--regime-fast-ema-period",
         type=int,
         default=50,
@@ -293,6 +306,28 @@ def _comparison_rows_for_segment(
         min_atr_pct=args.min_atr_pct,
         suggested_quote_amount=settings.max_order_usdt,
     )
+    # V22 candidate: EMA/RSI gated by the historically-available volume-spike
+    # feature. Taker/order-book filters are left disabled here; order-book data
+    # does not exist historically, so requiring it in a backtest is a config
+    # error by design (see FeatureFilteredStrategy).
+    feature_filtered_strategy = FeatureFilteredStrategy(
+        base_strategy=EmaRsiStrategy(
+            fast_period=args.ema_fast_period,
+            slow_period=args.ema_slow_period,
+            rsi_period=args.rsi_period,
+            rsi_buy_min=args.rsi_buy_min,
+            rsi_buy_max=args.rsi_buy_max,
+            rsi_sell_min=args.rsi_sell_min,
+            suggested_quote_amount=settings.max_order_usdt,
+            trend_ema_period=args.trend_ema_period if args.trend_ema_period > 0 else None,
+            min_ema_gap_pct=args.min_ema_gap_pct,
+            atr_period=args.atr_period if args.atr_period > 0 else None,
+            min_atr_pct=args.min_atr_pct,
+        ),
+        volume_spike_lookback=args.feature_volume_spike_lookback,
+        min_volume_spike_ratio=args.feature_min_volume_spike if args.feature_min_volume_spike > 0 else None,
+        name="feature_filtered_ema_rsi_v22",
+    )
 
     common = {
         "candles": candles,
@@ -364,6 +399,14 @@ def _comparison_rows_for_segment(
             category="strategy_candidate",
             result=_run_strategy(strategy=mean_reversion_strategy, **common),
             notes="Z-score mean reversion: buy stretched dips, sell reversion to the mean.",
+        ),
+        StrategyComparisonRow(
+            timeframe=timeframe,
+            segment=segment,
+            strategy_name="feature_filtered_ema_rsi_v22",
+            category="strategy_candidate",
+            result=_run_strategy(strategy=feature_filtered_strategy, **common),
+            notes="V22: EMA/RSI gated by volume-spike feature (order-book unavailable historically).",
         ),
     ]
 

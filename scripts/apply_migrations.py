@@ -16,6 +16,7 @@ async def main() -> None:
 
     migrations_dir = Path(__file__).resolve().parents[1] / "app" / "storage" / "migrations"
     base_migration_path = migrations_dir / "001_init.sql"
+    market_features_migration_path = migrations_dir / "003_market_features.sql"
     timescale_migration_path = migrations_dir / "002_timescale_optional.sql"
 
     db = Database(settings.database_url)
@@ -23,6 +24,9 @@ async def main() -> None:
         await db.connect()
         await db.apply_migration_file(base_migration_path)
         logger.info("db_migration_applied", migration=str(base_migration_path))
+
+        await db.apply_migration_file(market_features_migration_path)
+        logger.info("db_migration_applied", migration=str(market_features_migration_path))
 
         if settings.database_use_timescaledb:
             await db.apply_migration_file(timescale_migration_path)
