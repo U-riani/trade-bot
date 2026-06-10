@@ -7,6 +7,7 @@ import orjson
 from app.execution.models import OrderResult, PortfolioSnapshot
 from app.market.features import MarketFeatures
 from app.market.models import Candle
+from app.market.order_book import OrderBookSnapshot
 from app.risk.models import RiskDecision
 from app.storage.db import Database
 from app.strategy.models import TradeSignal
@@ -279,7 +280,8 @@ class TradingRepository:
             """
             SELECT exchange, symbol, timeframe, open_time, close_time, close_price, volume,
                    quote_volume, taker_buy_base_volume, taker_buy_quote_volume, taker_buy_ratio,
-                   order_book_bid_volume, order_book_ask_volume, order_book_imbalance, spread_pct
+                   order_book_bid_volume, order_book_ask_volume, order_book_imbalance, spread_pct,
+                   imbalance_top_5, imbalance_top_10, imbalance_top_20, order_book_snapshot_count
             FROM market_features
             WHERE exchange = $1 AND symbol = $2 AND timeframe = $3
             ORDER BY close_time DESC
@@ -293,6 +295,9 @@ class TradingRepository:
 
         def _opt_float(value: object) -> float | None:
             return None if value is None else float(value)  # type: ignore[arg-type]
+
+        def _opt_int(value: object) -> int | None:
+            return None if value is None else int(value)  # type: ignore[arg-type]
 
         features = [
             MarketFeatures(
@@ -311,11 +316,166 @@ class TradingRepository:
                 order_book_ask_volume=_opt_float(row["order_book_ask_volume"]),
                 order_book_imbalance=_opt_float(row["order_book_imbalance"]),
                 spread_pct=_opt_float(row["spread_pct"]),
+                imbalance_top_5=_opt_float(row["imbalance_top_5"]),
+                imbalance_top_10=_opt_float(row["imbalance_top_10"]),
+                imbalance_top_20=_opt_float(row["imbalance_top_20"]),
+                order_book_snapshot_count=_opt_int(row["order_book_snapshot_count"]),
             )
             for row in rows
         ]
         features.reverse()
         return features
+
+    async def insert_order_book_snapshots(self, snapshots: list[OrderBookSnapshot]) -> int:
+        """Append order-book snapshots (no overwrite). Returns rows inserted."""
+        if not snapshots:
+            return 0
+        pool = self.db.require_pool()
+        await pool.executemany(
+            """
+            INSERT INTO order_book_snapshots(
+                exchange, symbol, collected_at, best_bid_price, best_ask_price, spread, spread_pct,
+                bid_volume_top_5, ask_volume_top_5, bid_volume_top_10, ask_volume_top_10,
+                bid_volume_top_20, ask_volume_top_20,
+                imbalance_top_5, imbalance_top_10, imbalance_top_20, raw_depth_limit
+            )
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            """,
+            [
+                (
+                    s.exchange,
+                    s.symbol,
+                    s.collected_at,
+                    s.best_bid_price,
+                    s.best_ask_price,
+                    s.spread,
+                    s.spread_pct,
+                    s.bid_volume_top_5,
+                    s.ask_volume_top_5,
+                    s.bid_volume_top_10,
+                    s.ask_volume_top_10,
+                    s.bid_volume_top_20,
+                    s.ask_volume_top_20,
+                    s.imbalance_top_5,
+                    s.imbalance_top_10,
+                    s.imbalance_top_20,
+                    s.raw_depth_limit,
+                )
+                for s in snapshots
+            ],
+        )
+        return len(snapshots)
+
+    async def count_order_book_snapshots(self, *, exchange: str, symbol: str) -> int:
+        pool = self.db.require_pool()
+        value = await pool.fetchval(
+            "SELECT COUNT(*) FROM order_book_snapshots WHERE exchange = $1 AND symbol = $2",
+            exchange,
+            symbol,
+        )
+        return int(value or 0)
+
+    async def load_order_book_snapshots(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        limit: int,
+    ) -> list[OrderBookSnapshot]:
+        if limit <= 0:
+            return []
+        pool = self.db.require_pool()
+        rows = await pool.fetch(
+            """
+            SELECT exchange, symbol, collected_at, best_bid_price, best_ask_price, spread, spread_pct,
+                   bid_volume_top_5, ask_volume_top_5, bid_volume_top_10, ask_volume_top_10,
+                   bid_volume_top_20, ask_volume_top_20,
+                   imbalance_top_5, imbalance_top_10, imbalance_top_20, raw_depth_limit
+            FROM order_book_snapshots
+            WHERE exchange = $1 AND symbol = $2
+            ORDER BY collected_at DESC
+            LIMIT $3
+            """,
+            exchange,
+            symbol,
+            limit,
+        )
+        snapshots = [
+            OrderBookSnapshot(
+                exchange=row["exchange"],
+                symbol=row["symbol"],
+                collected_at=row["collected_at"],
+                best_bid_price=float(row["best_bid_price"]),
+                best_ask_price=float(row["best_ask_price"]),
+                spread=float(row["spread"]),
+                spread_pct=float(row["spread_pct"]),
+                bid_volume_top_5=float(row["bid_volume_top_5"]),
+                ask_volume_top_5=float(row["ask_volume_top_5"]),
+                bid_volume_top_10=float(row["bid_volume_top_10"]),
+                ask_volume_top_10=float(row["ask_volume_top_10"]),
+                bid_volume_top_20=float(row["bid_volume_top_20"]),
+                ask_volume_top_20=float(row["ask_volume_top_20"]),
+                imbalance_top_5=float(row["imbalance_top_5"]),
+                imbalance_top_10=float(row["imbalance_top_10"]),
+                imbalance_top_20=float(row["imbalance_top_20"]),
+                raw_depth_limit=int(row["raw_depth_limit"]),
+            )
+            for row in rows
+        ]
+        snapshots.reverse()
+        return snapshots
+
+    async def upsert_market_features_order_book(self, rows: list[MarketFeatures]) -> int:
+        """Insert or update the order-book columns of market_features per bucket.
+
+        Keyed by (exchange, symbol, timeframe, close_time). On conflict only the
+        order-book columns are updated; existing candle price/volume are left
+        untouched. New rows carry the candle's price/volume from the caller.
+        Returns the number of rows processed.
+        """
+        if not rows:
+            return 0
+        pool = self.db.require_pool()
+        await pool.executemany(
+            """
+            INSERT INTO market_features(
+                exchange, symbol, timeframe, open_time, close_time, close_price, volume,
+                order_book_bid_volume, order_book_ask_volume, order_book_imbalance, spread_pct,
+                imbalance_top_5, imbalance_top_10, imbalance_top_20, order_book_snapshot_count
+            )
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            ON CONFLICT (exchange, symbol, timeframe, close_time) DO UPDATE SET
+                order_book_bid_volume = EXCLUDED.order_book_bid_volume,
+                order_book_ask_volume = EXCLUDED.order_book_ask_volume,
+                order_book_imbalance = EXCLUDED.order_book_imbalance,
+                spread_pct = EXCLUDED.spread_pct,
+                imbalance_top_5 = EXCLUDED.imbalance_top_5,
+                imbalance_top_10 = EXCLUDED.imbalance_top_10,
+                imbalance_top_20 = EXCLUDED.imbalance_top_20,
+                order_book_snapshot_count = EXCLUDED.order_book_snapshot_count
+            """,
+            [
+                (
+                    row.exchange,
+                    row.symbol,
+                    row.timeframe,
+                    row.open_time,
+                    row.close_time,
+                    row.close_price,
+                    row.volume,
+                    row.order_book_bid_volume,
+                    row.order_book_ask_volume,
+                    row.order_book_imbalance,
+                    row.spread_pct,
+                    row.imbalance_top_5,
+                    row.imbalance_top_10,
+                    row.imbalance_top_20,
+                    row.order_book_snapshot_count,
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
 
     async def count_market_features(self, *, exchange: str, symbol: str, timeframe: str) -> int:
         pool = self.db.require_pool()
@@ -340,6 +500,7 @@ class TradingRepository:
             "positions",
             "bot_events",
             "market_features",
+            "order_book_snapshots",
         }
         if table_name not in allowed:
             raise ValueError(f"Unsupported table: {table_name}")

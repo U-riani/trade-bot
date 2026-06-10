@@ -46,6 +46,12 @@ class MarketFeatures:
     order_book_ask_volume: float | None = None
     order_book_imbalance: float | None = None
     spread_pct: float | None = None
+    # V23 aggregated live order-book features (per-depth imbalance + snapshot
+    # count). NULL until scripts.aggregate_order_book_features fills a bucket.
+    imbalance_top_5: float | None = None
+    imbalance_top_10: float | None = None
+    imbalance_top_20: float | None = None
+    order_book_snapshot_count: int | None = None
 
 
 @dataclass(slots=True, frozen=True)

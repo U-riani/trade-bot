@@ -1092,3 +1092,88 @@ The features that might actually carry order-flow signal — order-book imbalanc
 and spread — **cannot be tested historically** and would require building a
 forward-looking dataset first. That, not another OHLC permutation, is the honest
 next step.
+
+## V23 live order-book feature collector
+
+### Purpose
+
+V22 showed that no historically-available feature (volume, taker-buy ratio,
+candle shape) predicts forward returns. The only untested information left is
+the **order book** — imbalance and spread — and Binance does not serve
+historical depth, so it cannot be backtested. V23 is the data-collection
+groundwork: it polls the live order book and stores spread/imbalance features so
+that, **after enough data accumulates**, we can finally test whether they
+predict anything.
+
+This is **data collection only**. There is no trading, no signal generation, and
+no profitability claim. The whole point is that we do not yet have enough data
+to make one.
+
+### Forward-looking only — and it needs time
+
+Binance `/api/v3/depth` returns the **current** book, never past books. Every
+snapshot describes the instant it was fetched. There is therefore **no way to
+backfill** order-book history, and nothing in V23 fabricates it. The dataset
+must grow forward in real time. A few minutes of collection is enough to prove
+the pipeline works; testing predictive value needs **days to weeks** of
+snapshots so that aggregated buckets line up with many *closed* candles that
+have measurable forward returns. Until then, the analyzer honestly reports
+`sample_size 0` for these features.
+
+### Storage
+
+Migration `004_order_book_snapshots.sql` adds the append-only
+`order_book_snapshots` table (one row per poll, no unique constraint so nothing
+is ever overwritten) and extends `market_features` with `imbalance_top_5/10/20`
+and `order_book_snapshot_count`. Apply with:
+
+```powershell
+python -m scripts.apply_migrations
+```
+
+### Step 1 — collect snapshots (run this for a long time)
+
+Polls `/depth` every few seconds and stores spread + top 5/10/20 imbalance.
+Stops cleanly on Ctrl+C.
+
+```powershell
+python -m scripts.collect_order_book_features --symbol BTCUSDT --interval-seconds 5 --limit 100
+```
+
+Useful flags: `--dry-run` (compute/log only, no DB writes), `--max-snapshots N`
+(stop after N), `--exchange`, `--market-data-source production`. For real
+research, leave it running (e.g. as a background process or scheduled task) so
+the dataset accumulates over days.
+
+### Step 2 — aggregate snapshots into candle buckets
+
+Buckets snapshots into 1m/5m/15m candle windows and upserts per-bucket averages
+into `market_features`. Only buckets that actually contain snapshots are
+written; periods with no observations stay NULL.
+
+```powershell
+python -m scripts.aggregate_order_book_features --market-data-source production --source db --candle-limit 5000 --timeframes 1m,5m,15m
+```
+
+### Step 3 — analyze (once enough has accumulated)
+
+`scripts.analyze_market_features` already includes `spread_pct`,
+`order_book_imbalance`, and `imbalance_top_5/10/20`. Re-run it after the dataset
+grows:
+
+```powershell
+python -m scripts.analyze_market_features --market-data-source production --source db --limit 50000 --timeframes 5m,15m --export-json reports/feature_analysis_v23.json --export-csv reports/feature_analysis_v23.csv
+```
+
+### Can we judge profitability yet? No — not even close.
+
+**Profitability cannot be judged until enough order-book snapshots have been
+collected.** At the time of writing, the live dataset is only large enough to
+prove the collector, aggregation, and analysis pipeline runs end to end (a
+handful of snapshots aggregated into 1m/5m buckets). That is nowhere near enough
+to measure predictive value: the analyzer correctly reports `sample_size 0` for
+the order-book features because the few collected buckets do not yet have enough
+*following* candles to compute forward returns. A real verdict requires letting
+the collector run for days to weeks first. Until then, any claim about whether
+order-book imbalance predicts BTC returns — in either direction — would be
+fiction.

@@ -82,8 +82,14 @@ def _build_feature_series(
         "upper_wick_pct": [candle_upper_wick_pct(c) for c in candles],
         "lower_wick_pct": [candle_lower_wick_pct(c) for c in candles],
         "taker_buy_ratio": _feature_attr("taker_buy_ratio"),
+        # V23 live order-book features. NULL until enough snapshots are
+        # collected and aggregated, so these report sample_size 0 honestly until
+        # the forward-looking dataset has accumulated.
         "order_book_imbalance": _feature_attr("order_book_imbalance"),
         "spread_pct": _feature_attr("spread_pct"),
+        "imbalance_top_5": _feature_attr("imbalance_top_5"),
+        "imbalance_top_10": _feature_attr("imbalance_top_10"),
+        "imbalance_top_20": _feature_attr("imbalance_top_20"),
     }
 
 
