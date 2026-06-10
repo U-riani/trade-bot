@@ -32,6 +32,7 @@ from app.strategy.base import Strategy
 from app.strategy.breakout_momentum import BreakoutMomentumStrategy
 from app.strategy.ema_rsi import EmaRsiStrategy
 from app.strategy.market_regime import MarketRegimeFilteredStrategy
+from app.strategy.mean_reversion import MeanReversionStrategy
 from scripts.backtest_strategy import _decimal_to_str, _load_candles, _resolve_market_data_source
 
 logger = get_logger(__name__)
@@ -139,6 +140,30 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--breakout-lookback", type=int, default=20)
     parser.add_argument("--breakout-exit-lookback", type=int, default=10)
     parser.add_argument("--breakout-min-pct", type=Decimal, default=Decimal("0"))
+    parser.add_argument(
+        "--mr-lookback",
+        type=int,
+        default=20,
+        help="Mean-reversion rolling window for the mean/std z-score band.",
+    )
+    parser.add_argument(
+        "--mr-entry-z",
+        type=Decimal,
+        default=Decimal("2.0"),
+        help="Buy when close is this many std-devs below the mean.",
+    )
+    parser.add_argument(
+        "--mr-exit-z",
+        type=Decimal,
+        default=Decimal("0.0"),
+        help="Sell when close reverts to within this many std-devs of the mean.",
+    )
+    parser.add_argument(
+        "--mr-rsi-buy-max",
+        type=float,
+        default=35.0,
+        help="Mean-reversion oversold RSI ceiling for entries. Use <=0 to disable.",
+    )
     parser.add_argument(
         "--regime-fast-ema-period",
         type=int,
@@ -257,6 +282,17 @@ def _comparison_rows_for_segment(
         min_atr_pct=args.min_atr_pct,
         min_breakout_pct=args.breakout_min_pct,
     )
+    mean_reversion_strategy = MeanReversionStrategy(
+        lookback=args.mr_lookback,
+        entry_z=args.mr_entry_z,
+        exit_z=args.mr_exit_z,
+        rsi_period=args.rsi_period,
+        rsi_buy_max=args.mr_rsi_buy_max if args.mr_rsi_buy_max > 0 else None,
+        trend_ema_period=args.trend_ema_period if args.trend_ema_period > 0 else None,
+        atr_period=args.atr_period if args.atr_period > 0 else None,
+        min_atr_pct=args.min_atr_pct,
+        suggested_quote_amount=settings.max_order_usdt,
+    )
 
     common = {
         "candles": candles,
@@ -320,6 +356,14 @@ def _comparison_rows_for_segment(
             category="strategy_candidate",
             result=_run_strategy(strategy=breakout_strategy, **common),
             notes="Breakout above prior high with trend/ATR filters and low-break exit.",
+        ),
+        StrategyComparisonRow(
+            timeframe=timeframe,
+            segment=segment,
+            strategy_name="mean_reversion_v1",
+            category="strategy_candidate",
+            result=_run_strategy(strategy=mean_reversion_strategy, **common),
+            notes="Z-score mean reversion: buy stretched dips, sell reversion to the mean.",
         ),
     ]
 
@@ -595,6 +639,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
         raise SystemExit("--regime-min-slope-pct cannot be negative")
     if args.regime_min_ema_gap_pct < 0:
         raise SystemExit("--regime-min-ema-gap-pct cannot be negative")
+    if args.mr_lookback <= 1:
+        raise SystemExit("--mr-lookback must be greater than 1")
+    if args.mr_entry_z <= 0:
+        raise SystemExit("--mr-entry-z must be positive")
+    if args.mr_exit_z < -args.mr_entry_z:
+        raise SystemExit("--mr-exit-z must be greater than -(--mr-entry-z)")
 
     source_candles = await _load_candles(args.source, args.limit, args.market_data_source)
     if not source_candles:
