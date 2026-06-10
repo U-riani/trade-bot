@@ -10,6 +10,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from app.backtesting.analytics import (
+    EquityStatistics,
+    TradeStatistics,
+    bars_per_year_for_timeframe,
+    compute_equity_statistics,
+    compute_trade_statistics,
+)
 from app.backtesting.benchmarks import (
     buy_and_hold_order_sized_benchmark,
     no_trade_benchmark,
@@ -44,6 +51,17 @@ class StrategyComparisonRow:
         metrics = self.result.metrics
         return metrics.final_equity - (metrics.max_drawdown * Decimal("0.05")) - (
             metrics.total_fees * Decimal("0.05")
+        )
+
+    @property
+    def trade_stats(self) -> TradeStatistics:
+        return compute_trade_statistics(self.result.trades)
+
+    @property
+    def equity_stats(self) -> EquityStatistics:
+        return compute_equity_statistics(
+            self.result.equity_curve,
+            bars_per_year=bars_per_year_for_timeframe(self.timeframe),
         )
 
 
@@ -317,6 +335,28 @@ def _row_payload(row: StrategyComparisonRow, rank: int) -> dict[str, Any]:
         "score": _decimal_to_str(row.score),
         "notes": row.notes,
         "metrics": _metrics_payload(metrics),
+        "edge": _analytics_payload(row.trade_stats, row.equity_stats),
+    }
+
+
+def _analytics_payload(trade_stats: TradeStatistics, equity_stats: EquityStatistics) -> dict[str, Any]:
+    """Edge-quality block: the numbers that separate a real edge from a lucky run."""
+    return {
+        "profit_factor": _decimal_to_str(trade_stats.profit_factor),
+        "expectancy": _decimal_to_str(trade_stats.expectancy),
+        "expectancy_r": _decimal_to_str(trade_stats.expectancy_r),
+        "payoff_ratio": _decimal_to_str(trade_stats.payoff_ratio),
+        "avg_win": _decimal_to_str(trade_stats.avg_win),
+        "avg_loss": _decimal_to_str(trade_stats.avg_loss),
+        "avg_return_pct": _decimal_to_str(trade_stats.avg_return_pct),
+        "largest_win": _decimal_to_str(trade_stats.largest_win),
+        "largest_loss": _decimal_to_str(trade_stats.largest_loss),
+        "max_consecutive_wins": trade_stats.max_consecutive_wins,
+        "max_consecutive_losses": trade_stats.max_consecutive_losses,
+        "trade_return_sharpe": _decimal_to_str(trade_stats.trade_return_sharpe),
+        "sharpe_annualized": _decimal_to_str(equity_stats.sharpe),
+        "sortino_annualized": _decimal_to_str(equity_stats.sortino),
+        "max_drawdown_pct": _decimal_to_str(equity_stats.max_drawdown_pct),
     }
 
 
@@ -369,8 +409,51 @@ def _rank_rows(rows: list[StrategyComparisonRow]) -> list[tuple[int, StrategyCom
     return ranked
 
 
+def _log_overfit_report(rows: list[StrategyComparisonRow]) -> None:
+    """Flag strategies that look good on train data but fall apart on validation.
+
+    The single most common way a backtest lies: a parameter set that fits the
+    in-sample noise. We catch it by comparing the same strategy's return on the
+    train segment versus the held-out validation segment. Benchmarks are skipped
+    because "do nothing" cannot overfit.
+    """
+    by_key: dict[tuple[str, str], dict[str, StrategyComparisonRow]] = {}
+    for row in rows:
+        if row.category == "benchmark":
+            continue
+        key = (row.timeframe, row.strategy_name)
+        by_key.setdefault(key, {})[row.segment] = row
+
+    for (timeframe, strategy_name), segments in sorted(by_key.items()):
+        train = segments.get("train")
+        validation = segments.get("validation")
+        if train is None or validation is None:
+            continue
+
+        train_return = train.result.metrics.return_pct
+        validation_return = validation.result.metrics.return_pct
+        degradation = train_return - validation_return
+
+        # Positive in-sample but non-positive out-of-sample is the textbook tell.
+        overfit_suspected = train_return > 0 >= validation_return
+        verdict = "overfit_suspected" if overfit_suspected else "ok"
+
+        logger.info(
+            "strategy_overfit_check",
+            timeframe=timeframe,
+            strategy_name=strategy_name,
+            verdict=verdict,
+            train_return_pct=str(train_return),
+            validation_return_pct=str(validation_return),
+            degradation_pct=str(degradation),
+            validation_round_trips=validation.result.metrics.round_trips,
+        )
+
+
 def _log_row(rank: int, row: StrategyComparisonRow) -> None:
     metrics = row.result.metrics
+    trade_stats = row.trade_stats
+    equity_stats = row.equity_stats
     logger.info(
         "strategy_comparison_result",
         rank=rank,
@@ -384,6 +467,11 @@ def _log_row(rank: int, row: StrategyComparisonRow) -> None:
         max_drawdown=str(metrics.max_drawdown),
         round_trips=metrics.round_trips,
         win_rate=round(metrics.win_rate, 4),
+        profit_factor=_decimal_to_str(trade_stats.profit_factor),
+        expectancy=str(trade_stats.expectancy),
+        expectancy_r=_decimal_to_str(trade_stats.expectancy_r),
+        sharpe_annualized=_decimal_to_str(equity_stats.sharpe),
+        max_consecutive_losses=trade_stats.max_consecutive_losses,
         total_fees=str(metrics.total_fees),
         has_open_position=metrics.has_open_position,
     )
@@ -413,6 +501,14 @@ def _export_csv(path: Path, ranked_rows: list[tuple[int, StrategyComparisonRow]]
         "winning_trades",
         "losing_trades",
         "win_rate",
+        "profit_factor",
+        "expectancy",
+        "expectancy_r",
+        "payoff_ratio",
+        "sharpe_annualized",
+        "sortino_annualized",
+        "max_drawdown_pct",
+        "max_consecutive_losses",
         "total_fees",
         "realized_pnl",
         "unrealized_pnl",
@@ -424,6 +520,8 @@ def _export_csv(path: Path, ranked_rows: list[tuple[int, StrategyComparisonRow]]
         writer.writeheader()
         for rank, row in ranked_rows:
             metrics = row.result.metrics
+            trade_stats = row.trade_stats
+            equity_stats = row.equity_stats
             writer.writerow(
                 {
                     "rank": rank,
@@ -440,6 +538,14 @@ def _export_csv(path: Path, ranked_rows: list[tuple[int, StrategyComparisonRow]]
                     "winning_trades": metrics.winning_trades,
                     "losing_trades": metrics.losing_trades,
                     "win_rate": metrics.win_rate,
+                    "profit_factor": _decimal_to_str(trade_stats.profit_factor),
+                    "expectancy": str(trade_stats.expectancy),
+                    "expectancy_r": _decimal_to_str(trade_stats.expectancy_r),
+                    "payoff_ratio": _decimal_to_str(trade_stats.payoff_ratio),
+                    "sharpe_annualized": _decimal_to_str(equity_stats.sharpe),
+                    "sortino_annualized": _decimal_to_str(equity_stats.sortino),
+                    "max_drawdown_pct": str(equity_stats.max_drawdown_pct),
+                    "max_consecutive_losses": trade_stats.max_consecutive_losses,
                     "total_fees": str(metrics.total_fees),
                     "realized_pnl": str(metrics.realized_pnl),
                     "unrealized_pnl": str(metrics.unrealized_pnl),
@@ -583,6 +689,8 @@ async def main(argv: Sequence[str] | None = None) -> None:
     for rank, row in ranked_rows:
         if rank <= args.top:
             _log_row(rank, row)
+
+    _log_overfit_report(rows)
 
     if args.export_json:
         _export_json(args.export_json, ranked_rows)

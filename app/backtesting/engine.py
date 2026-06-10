@@ -58,6 +58,7 @@ class BacktestEngine:
         trades: list[BacktestTrade] = []
         equity_peak = self.initial_quote_balance
         max_drawdown = Decimal("0")
+        equity_curve: list[Decimal] = []
 
         for candle in sorted_candles:
             if not state.add_candle(candle):
@@ -137,6 +138,7 @@ class BacktestEngine:
                     open_position = None
 
             current_equity = quote_balance + (position_quantity * last_price)
+            equity_curve.append(current_equity)
             if current_equity > equity_peak:
                 equity_peak = current_equity
             drawdown = equity_peak - current_equity
@@ -167,7 +169,7 @@ class BacktestEngine:
             open_position_avg_entry_price=avg_entry_price,
             last_price=last_price,
         )
-        return BacktestResult(metrics=metrics, trades=trades)
+        return BacktestResult(metrics=metrics, trades=trades, equity_curve=equity_curve)
 
     def _next_signal(self, *, state: MarketState, portfolio: PortfolioSnapshot) -> TradeSignal:
         exit_signal = build_position_exit_signal(

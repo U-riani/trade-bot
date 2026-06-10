@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
@@ -70,3 +70,7 @@ class BacktestMetrics:
 class BacktestResult:
     metrics: BacktestMetrics
     trades: list[BacktestTrade]
+    # Per-bar mark-to-market equity, one entry per processed candle. Used by
+    # app.backtesting.analytics for Sharpe/Sortino/drawdown. Optional so the
+    # cheap benchmarks (no_trade, buy-and-hold) can omit it.
+    equity_curve: list[Decimal] = field(default_factory=list)
