@@ -1,0 +1,22 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: crypto_trading_bot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trading_bot
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: trader_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - trading_bot_pgdata:/var/lib/postgresql/data
+      - ./app/storage/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trading_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  trading_bot_pgdata:
