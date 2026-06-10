@@ -1,0 +1,220 @@
+# taskV25.1.1.txt
+
+Continue from current `main` branch of `U-riani/trade-bot`.
+
+V24 is complete and good enough. It added order-book pipeline observability, status checks, improved aggregation logs, improved analyzer no-data reasons, and a research-cycle helper. The project is now ready for V25.
+
+IMPORTANT CURRENT STATUS
+
+- The order-book collector works.
+- V24 showed the previous issue clearly: snapshots existed but many were too new because candles were not backfilled/closed yet.
+- V24 status/readiness tools now explain when to backfill, aggregate, wait, or analyze.
+- We still cannot judge predictive value because there is not enough forward-looking order-book data.
+- Do not add trading.
+- Do not create a new strategy.
+- Do not claim profit.
+- Do not fabricate historical order-book data.
+- No secrets committed.
+- Full pytest must pass.
+
+TASK
+
+Build V25: long-running order-book collector reliability and dataset health.
+
+GOAL
+
+Make the live order-book collector safe and practical to run for days/weeks, with resume-safe behavior, health reporting, and operational guardrails.
+
+This version is infrastructure/reliability only. V25 still does not evaluate profitability. It only makes data collection reliable enough so future analysis can be trusted.
+
+PHASE 1: COLLECTOR RUNTIME IMPROVEMENTS
+
+Update:
+
+`scripts.collect_order_book_features`
+
+Add CLI options:
+
+- `--run-id`
+- `--heartbeat-every-seconds`
+- `--max-failures`
+- `--backoff-initial-seconds`
+- `--backoff-max-seconds`
+- `--jitter`
+- `--quiet-http-logs` if possible
+- `--stats-every-snapshots`
+
+Required behavior:
+
+- Continue through transient Binance/network errors.
+- Use exponential backoff after failures.
+- Reset backoff after successful collection.
+- Stop cleanly if failures exceed `--max-failures`, unless max is 0 / disabled.
+- Log periodic heartbeat with:
+  - run_id
+  - collected
+  - failures
+  - last_snapshot_at
+  - average interval
+  - table_total
+- Keep Ctrl+C clean shutdown.
+- Do not add trading logic.
+
+The existing default collector command must continue working:
+
+```powershell
+python -m scripts.collect_order_book_features --symbol BTCUSDT --interval-seconds 5 --limit 100
+```
+
+PHASE 2: COLLECTOR RUN TRACKING TABLE
+
+Add a migration for:
+
+`order_book_collector_runs`
+
+Fields:
+
+- id
+- run_id
+- exchange
+- symbol
+- started_at
+- stopped_at
+- status
+- interval_seconds
+- depth_limit
+- collected_count
+- failure_count
+- last_snapshot_at
+- stop_reason
+- created_at
+- updated_at
+
+Update collector behavior:
+
+- Create/update run record when DB is enabled.
+- Mark status:
+  - running
+  - stopped
+  - failed
+  - interrupted
+- Store final counts and stop reason.
+- Do not require this table for dry-run.
+- Do not write run tracking data in dry-run mode.
+
+PHASE 3: DATA HEALTH SCRIPT
+
+Create:
+
+`scripts.order_book_dataset_health`
+
+It should report:
+
+- total snapshots
+- total collector runs
+- active/running/stopped/failed runs
+- first/latest snapshot
+- gaps larger than expected interval × threshold
+- per-hour snapshot counts for last 24h
+- estimated 1m/5m/15m bucket coverage
+- whether enough data exists for analysis at min sample threshold
+
+Example command:
+
+```powershell
+python -m scripts.order_book_dataset_health --market-data-source production --symbol BTCUSDT --expected-interval-seconds 5 --gap-multiplier 3
+```
+
+Health output should be clear enough to answer:
+
+- Is the collector running consistently?
+- Did it stop/fail?
+- Are there large gaps?
+- How much usable dataset coverage exists?
+- Is it ready for analysis yet?
+
+PHASE 4: WINDOWS RUNNER DOCUMENTATION
+
+Update README with a practical Windows workflow:
+
+- run collector in one PowerShell window
+- run daily research cycle in another
+- how to stop collector safely
+- how to check health
+- optional Task Scheduler notes, but do not overcomplicate
+
+The documentation should make clear:
+
+- The collector must run for days/weeks.
+- Dataset health is checked separately from profitability.
+- V25 still cannot judge predictive value or profitability.
+
+PHASE 5: TESTS
+
+Add tests for:
+
+- backoff calculation
+- run-id generation/defaulting
+- heartbeat/stat calculation
+- stop condition on max failures
+- run tracking repository insert/update
+- dataset health gap detection
+- dry-run behavior without DB
+
+Full test suite must pass:
+
+```powershell
+pytest
+```
+
+ACCEPTANCE CRITERIA
+
+- `pytest` passes.
+- Collector can still run exactly like before with the default command.
+- Dry-run works.
+- Real DB run tracking works.
+- Dataset health script runs.
+- README explains day-to-day operation.
+- No secrets committed.
+- No trading logic added.
+- No new strategy added.
+- No historical order-book data fabricated.
+- Final answer must clearly say:
+
+“V25 still does not evaluate profitability; it only makes data collection reliable.”
+
+RECOMMENDED VERIFICATION COMMANDS
+
+Run these before final response:
+
+```powershell
+python -m scripts.collect_order_book_features --dry-run --max-snapshots 3 --symbol BTCUSDT --interval-seconds 2 --limit 100
+```
+
+```powershell
+python -m scripts.collect_order_book_features --symbol BTCUSDT --interval-seconds 2 --limit 100 --max-snapshots 3
+```
+
+```powershell
+python -m scripts.order_book_dataset_health --market-data-source production --symbol BTCUSDT --expected-interval-seconds 5 --gap-multiplier 3
+```
+
+```powershell
+pytest
+```
+
+FINAL RESPONSE REQUIREMENTS
+
+In the final answer, summarize:
+
+- what changed
+- which tests passed
+- whether dry-run worked
+- whether real DB run tracking worked
+- whether dataset health script worked
+- any important limitations
+- next practical command for me to run
+
+Also explicitly state:
+
+“V25 still does not evaluate profitability; it only makes data collection reliable.”

@@ -1247,3 +1247,82 @@ Analyzing order-book imbalance is only meaningful once a timeframe reports
 `ready` (i.e. at least `--min-feature-samples` order-book buckets each have 6
 following candles). Before that, **any conclusion is premature** — which is the
 honest status today.
+
+## V25 long-running collector reliability and dataset health
+
+### Purpose
+
+The order-book dataset only becomes useful after days/weeks of continuous
+collection, so the collector has to survive transient Binance/network errors,
+restarts, and long uptimes. V25 adds that reliability (exponential backoff,
+heartbeat, run tracking, a failure stop-guard) plus a dataset-health report so
+you can tell whether collection is actually healthy. **V25 still does not
+evaluate profitability; it only makes data collection reliable.**
+
+### Day-to-day Windows workflow
+
+Run the collector in one PowerShell window and leave it running for days:
+
+```powershell
+python -m scripts.collect_order_book_features --symbol BTCUSDT --interval-seconds 5 --limit 100 --heartbeat-every-seconds 60 --quiet-http-logs
+```
+
+The collector now:
+- continues through transient errors with exponential backoff
+  (`--backoff-initial-seconds`, `--backoff-max-seconds`, `--jitter`), resetting
+  after each success;
+- logs a periodic heartbeat (`--heartbeat-every-seconds`) with run id, collected
+  count, failures, last snapshot time, average interval, and table total;
+- can stop after N **consecutive** failures (`--max-failures`, default 0 =
+  never stop on failures);
+- records the run in `order_book_collector_runs` (run id, status, counts, stop
+  reason) when a DB is connected;
+- stops cleanly on Ctrl+C (recorded as `interrupted`).
+
+In a second PowerShell window, run the daily research cycle (backfill →
+aggregate → status → optional analyze) from V24:
+
+```powershell
+python -m scripts.run_order_book_research_cycle --market-data-source production --symbol BTCUSDT --timeframes 1m,5m,15m --analyze
+```
+
+### How to stop the collector safely
+
+Press **Ctrl+C** in the collector window. It finishes the current poll, marks the
+run `interrupted` with final counts, closes the DB, and exits. Do not kill the
+window forcibly if you can avoid it, so the run record is finalized.
+
+### How to check dataset health
+
+Separately from any analysis, check whether collection is healthy:
+
+```powershell
+python -m scripts.order_book_dataset_health --market-data-source production --symbol BTCUSDT --expected-interval-seconds 5 --gap-multiplier 3
+```
+
+It answers, at a glance:
+- **Is the collector running consistently?** `dataset_health_runs` shows runs by
+  status; `dataset_health_last_24h` shows per-hour snapshot counts (zeros = the
+  collector was down that hour).
+- **Did it stop/fail?** run status counts (`stopped` / `failed` / `interrupted`).
+- **Are there large gaps?** `dataset_health_gaps` counts intervals longer than
+  `expected-interval-seconds × gap-multiplier` and the largest gap.
+- **How much usable coverage exists?** `dataset_health_coverage` shows distinct
+  1m/5m/15m buckets touched (a coverage estimate, not a forward-return sample
+  size — use `order_book_pipeline_status` for that).
+
+### Optional: Task Scheduler
+
+If you want the collector to start automatically, create a Windows Task Scheduler
+task that runs the collector command at logon with "Start in" set to the project
+folder. Keep it simple — a single always-on collector task plus a manual daily
+research cycle is enough. Use a fixed `--run-id` per scheduled task if you want
+its restarts to upsert one run record instead of creating new ones.
+
+### Why this still is not a profitability result
+
+Dataset health is checked **separately from profitability**. A perfectly healthy,
+gap-free dataset still says nothing about whether order-book imbalance predicts
+returns — that requires the forward-return analysis to reach `ready`, which needs
+weeks of data. **V25 makes the collection reliable; it does not, and cannot yet,
+judge predictive value or profitability.**

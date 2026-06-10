@@ -298,6 +298,10 @@ async def setup_database(settings: Settings) -> tuple[Database | None, TradingRe
         await db.apply_migration_file(order_book_migration_path)
         logger.info("db_migration_applied", migration=str(order_book_migration_path))
 
+        collector_runs_migration_path = migrations_dir / "005_order_book_collector_runs.sql"
+        await db.apply_migration_file(collector_runs_migration_path)
+        logger.info("db_migration_applied", migration=str(collector_runs_migration_path))
+
         if settings.database_use_timescaledb:
             timescale_migration_path = migrations_dir / "002_timescale_optional.sql"
             await db.apply_migration_file(timescale_migration_path)

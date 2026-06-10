@@ -5,6 +5,7 @@ from decimal import Decimal
 import orjson
 
 from app.execution.models import OrderResult, PortfolioSnapshot
+from app.market.collector_runtime import CollectorRun
 from app.market.features import MarketFeatures
 from app.market.models import Candle
 from app.market.order_book import OrderBookSnapshot
@@ -491,6 +492,121 @@ class TradingRepository:
         )
         return int(value or 0)
 
+    async def start_collector_run(self, run: CollectorRun) -> None:
+        """Insert (or resume) a collector run record. Upserts by run_id."""
+        pool = self.db.require_pool()
+        await pool.execute(
+            """
+            INSERT INTO order_book_collector_runs(
+                run_id, exchange, symbol, started_at, stopped_at, status,
+                interval_seconds, depth_limit, collected_count, failure_count,
+                last_snapshot_at, stop_reason, updated_at
+            )
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+            ON CONFLICT (run_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                interval_seconds = EXCLUDED.interval_seconds,
+                depth_limit = EXCLUDED.depth_limit,
+                updated_at = NOW()
+            """,
+            run.run_id,
+            run.exchange,
+            run.symbol,
+            run.started_at,
+            run.stopped_at,
+            run.status,
+            run.interval_seconds,
+            run.depth_limit,
+            run.collected_count,
+            run.failure_count,
+            run.last_snapshot_at,
+            run.stop_reason,
+        )
+
+    async def update_collector_run(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        collected_count: int,
+        failure_count: int,
+        last_snapshot_at,
+        stopped_at=None,
+        stop_reason: str | None = None,
+    ) -> None:
+        """Update progress / final state of a collector run by run_id."""
+        pool = self.db.require_pool()
+        await pool.execute(
+            """
+            UPDATE order_book_collector_runs SET
+                status = $2,
+                collected_count = $3,
+                failure_count = $4,
+                last_snapshot_at = $5,
+                stopped_at = $6,
+                stop_reason = $7,
+                updated_at = NOW()
+            WHERE run_id = $1
+            """,
+            run_id,
+            status,
+            collected_count,
+            failure_count,
+            last_snapshot_at,
+            stopped_at,
+            stop_reason,
+        )
+
+    async def count_collector_runs(self, *, exchange: str, symbol: str) -> int:
+        pool = self.db.require_pool()
+        value = await pool.fetchval(
+            "SELECT COUNT(*) FROM order_book_collector_runs WHERE exchange = $1 AND symbol = $2",
+            exchange,
+            symbol,
+        )
+        return int(value or 0)
+
+    async def load_collector_runs(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        limit: int,
+    ) -> list[CollectorRun]:
+        if limit <= 0:
+            return []
+        pool = self.db.require_pool()
+        rows = await pool.fetch(
+            """
+            SELECT run_id, exchange, symbol, started_at, stopped_at, status, interval_seconds,
+                   depth_limit, collected_count, failure_count, last_snapshot_at, stop_reason
+            FROM order_book_collector_runs
+            WHERE exchange = $1 AND symbol = $2
+            ORDER BY started_at DESC
+            LIMIT $3
+            """,
+            exchange,
+            symbol,
+            limit,
+        )
+        return [
+            CollectorRun(
+                run_id=row["run_id"],
+                exchange=row["exchange"],
+                symbol=row["symbol"],
+                started_at=row["started_at"],
+                stopped_at=row["stopped_at"],
+                status=row["status"],
+                interval_seconds=float(row["interval_seconds"]),
+                depth_limit=int(row["depth_limit"]),
+                collected_count=int(row["collected_count"]),
+                failure_count=int(row["failure_count"]),
+                last_snapshot_at=row["last_snapshot_at"],
+                stop_reason=row["stop_reason"],
+            )
+            for row in rows
+        ]
+
     async def count_table(self, table_name: str) -> int:
         allowed = {
             "candles",
@@ -501,6 +617,7 @@ class TradingRepository:
             "bot_events",
             "market_features",
             "order_book_snapshots",
+            "order_book_collector_runs",
         }
         if table_name not in allowed:
             raise ValueError(f"Unsupported table: {table_name}")
