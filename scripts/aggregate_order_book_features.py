@@ -25,6 +25,7 @@ from collections.abc import Sequence
 from app.backtesting.resample import resample_candles
 from app.config.logging import configure_logging, get_logger
 from app.config.settings import get_settings
+from app.backtesting.order_book_pipeline import snapshots_after_latest_candle
 from app.market.features import MarketFeatures, bucket_start_timestamp
 from app.market.models import Candle
 from app.market.order_book import OrderBookSnapshot, aggregate_snapshots
@@ -90,10 +91,21 @@ def build_order_book_feature_rows(
     return rows
 
 
+def resolve_symbol(override: str | None, default: str) -> str:
+    """Symbol override resolution: explicit --symbol wins, else settings default.
+
+    A whitespace-only override is treated as not provided.
+    """
+    if override is not None and override.strip():
+        return override.upper().strip()
+    return default.upper().strip()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Aggregate raw order-book snapshots into 1m/5m/15m market_features buckets."
     )
+    parser.add_argument("--symbol", default=None, help="Symbol. Default from settings (BTCUSDT).")
     parser.add_argument("--timeframes", default="1m,5m,15m")
     parser.add_argument("--source-timeframe", default="1m")
     parser.add_argument("--source", choices=("auto", "db", "rest"), default="db")
@@ -133,7 +145,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
 
     _market_data_source, _use_testnet, default_exchange = _resolve_market_data_source(args.market_data_source)
     exchange = args.exchange or default_exchange
-    symbol = settings.normalized_symbol
+    symbol = resolve_symbol(args.symbol, settings.normalized_symbol)
 
     db = Database(settings.database_url)
     await db.connect()
@@ -143,12 +155,14 @@ async def main(argv: Sequence[str] | None = None) -> None:
         snapshots = await repository.load_order_book_snapshots(
             exchange=exchange, symbol=symbol, limit=args.snapshot_limit
         )
+        latest_snapshot_at = max((s.collected_at for s in snapshots), default=None)
         logger.info(
             "order_book_aggregation_started",
             exchange=exchange,
             symbol=symbol,
             source_candles=len(source_candles),
             snapshots_loaded=len(snapshots),
+            latest_snapshot_at=None if latest_snapshot_at is None else latest_snapshot_at.isoformat(),
             timeframes=args.timeframes,
             dry_run=args.dry_run,
         )
@@ -158,10 +172,29 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 note="collect snapshots first with scripts.collect_order_book_features",
             )
 
+        # Diagnose the common failure: snapshots collected after the newest
+        # available candle cannot be bucketed until candles are backfilled.
+        finest_candles = resample_candles(
+            source_candles, target_timeframe="1m", source_timeframe=args.source_timeframe
+        )
+        latest_candle_close = finest_candles[-1].close_time if finest_candles else None
+        too_new = snapshots_after_latest_candle(snapshots, latest_candle_close)
+        if too_new > 0:
+            logger.warning(
+                "order_book_aggregation_snapshots_after_latest_candle",
+                snapshots_after_latest_candle=too_new,
+                latest_candle_close=None if latest_candle_close is None else latest_candle_close.isoformat(),
+                advice=(
+                    "Snapshots exist after latest candle close_time. Run backfill_candles first, "
+                    "wait for candles to close, then aggregate again."
+                ),
+            )
+
         for timeframe in _parse_timeframes(args.timeframes):
             candles = resample_candles(
                 source_candles, target_timeframe=timeframe, source_timeframe=args.source_timeframe
             )
+            tf_latest_candle_close = candles[-1].close_time if candles else None
             rows = build_order_book_feature_rows(
                 candles,
                 snapshots,
@@ -170,13 +203,21 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 timeframe=timeframe,
                 min_snapshots=args.min_snapshots_per_bucket,
             )
-            total_snapshots_used = sum(r.order_book_snapshot_count or 0 for r in rows)
+            matched_snapshots = sum(r.order_book_snapshot_count or 0 for r in rows)
+            unmatched_snapshots = len(snapshots) - matched_snapshots
             logger.info(
                 "order_book_aggregation_buckets",
                 timeframe=timeframe,
                 candles=len(candles),
+                latest_candle_close=None if tf_latest_candle_close is None else tf_latest_candle_close.isoformat(),
                 buckets_with_snapshots=len(rows),
-                snapshots_used=total_snapshots_used,
+                snapshots_matched=matched_snapshots,
+                snapshots_unmatched=unmatched_snapshots,
+                unmatched_reason=(
+                    "snapshots newer than candles; backfill candles and retry"
+                    if unmatched_snapshots > 0 and too_new > 0
+                    else ("ok" if unmatched_snapshots == 0 else "snapshots fall outside loaded candle range")
+                ),
             )
 
             if rows and not args.dry_run:

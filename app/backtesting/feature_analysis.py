@@ -22,6 +22,46 @@ from dataclasses import dataclass
 from math import sqrt
 
 
+# Features sourced from live order-book collection. When these are empty the
+# cause is "never collected", which is different from a feature that simply has
+# no rows yet.
+ORDER_BOOK_FEATURES = frozenset(
+    {"order_book_imbalance", "spread_pct", "imbalance_top_5", "imbalance_top_10", "imbalance_top_20"}
+)
+
+# Insufficiency reasons (constants so script + tests agree on exact strings).
+REASON_NO_FEATURE_ROWS = "no_feature_rows"
+REASON_NO_COLLECTED_ORDER_BOOK = "no_collected_order_book_data"
+REASON_NO_FORWARD_RETURNS = "feature_rows_exist_but_no_forward_returns_yet"
+REASON_NOT_ENOUGH_SAMPLES = "not_enough_samples"
+
+
+def classify_feature_data_reason(
+    *,
+    feature_name: str,
+    present_count: int,
+    sample_size: int,
+    min_samples: int,
+) -> str | None:
+    """Explain why a feature analysis is not usable, or None when it is.
+
+    * present_count: how many non-null feature values exist (before forward-return alignment)
+    * sample_size: usable (feature, forward-return) pairs after alignment
+
+    Order matters: distinguish "never collected" from "exists but too new" from
+    "exists but too few".
+    """
+    if present_count == 0:
+        if feature_name in ORDER_BOOK_FEATURES:
+            return REASON_NO_COLLECTED_ORDER_BOOK
+        return REASON_NO_FEATURE_ROWS
+    if sample_size == 0:
+        return REASON_NO_FORWARD_RETURNS
+    if sample_size < min_samples:
+        return REASON_NOT_ENOUGH_SAMPLES
+    return None
+
+
 def forward_returns(closes: list[float], horizon: int) -> list[float | None]:
     """Percent return from candle i to candle i+horizon; None when out of range."""
     if horizon <= 0:

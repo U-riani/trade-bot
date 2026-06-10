@@ -26,7 +26,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from app.backtesting.feature_analysis import FeatureHorizonAnalysis, analyze_feature
+from app.backtesting.feature_analysis import (
+    FeatureHorizonAnalysis,
+    analyze_feature,
+    classify_feature_data_reason,
+)
 from app.backtesting.resample import resample_candles
 from app.config.logging import configure_logging, get_logger
 from app.config.settings import get_settings
@@ -56,6 +60,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-data-source", choices=("production", "testnet"), default=None)
     parser.add_argument("--volume-spike-lookback", type=int, default=20)
     parser.add_argument("--num-buckets", type=int, default=5)
+    parser.add_argument(
+        "--min-feature-samples",
+        type=int,
+        default=100,
+        help="Warn that results are statistically useless below this sample size.",
+    )
     parser.add_argument("--export-json", type=Path, default=None)
     parser.add_argument("--export-csv", type=Path, default=None)
     return parser
@@ -223,19 +233,28 @@ async def main(argv: Sequence[str] | None = None) -> None:
             closes = [candle.close for candle in candles]
 
             for feature_name, values in series.items():
+                present_count = sum(1 for value in values if value is not None)
                 for horizon in HORIZONS:
                     analysis = analyze_feature(
                         feature_name, values, closes, horizon, num_buckets=args.num_buckets
                     )
                     payload.append(_analysis_payload(timeframe, analysis))
 
-                    if analysis.sample_size == 0:
+                    reason = classify_feature_data_reason(
+                        feature_name=feature_name,
+                        present_count=present_count,
+                        sample_size=analysis.sample_size,
+                        min_samples=args.min_feature_samples,
+                    )
+                    if reason is not None:
                         logger.info(
-                            "feature_analysis_no_data",
+                            "feature_analysis_insufficient",
                             timeframe=timeframe,
                             feature=feature_name,
                             horizon=horizon,
-                            note="no historical data for this feature",
+                            present_count=present_count,
+                            sample_size=analysis.sample_size,
+                            reason=reason,
                         )
                         continue
 

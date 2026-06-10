@@ -1177,3 +1177,73 @@ the order-book features because the few collected buckets do not yet have enough
 the collector run for days to weeks first. Until then, any claim about whether
 order-book imbalance predicts BTC returns — in either direction — would be
 fiction.
+
+## V24 order-book pipeline observability and workflow
+
+### Why this exists
+
+V23 collected order-book snapshots correctly but it was hard to tell whether the
+data was *usable*. A real run collected 57 snapshots yet only 3 matched candle
+buckets — because the candle table had not been backfilled past the snapshot
+times, so the snapshots' buckets had no closed candles to attach to. V24 makes
+that state visible and gives the exact next command. No trading logic, no
+strategy, no profitability claim — just operational clarity.
+
+### Check whether the data is ready
+
+`scripts.order_book_pipeline_status` is read-only and reports snapshot cadence,
+candle coverage, how many snapshots matched vs are "too new", per-timeframe
+analysis readiness, and the reason + next step when not ready:
+
+```powershell
+python -m scripts.order_book_pipeline_status --market-data-source production --symbol BTCUSDT --timeframes 1m,5m,15m
+```
+
+Key fields to read:
+- `too_new_snapshots` — snapshots collected after the latest candle close; these
+  cannot be aggregated until candles are backfilled and the buckets close.
+- `matched_snapshots` / `unmatched_snapshots` — how many can/can't be bucketed.
+- `reason` + `next_step` — exactly what to do next.
+
+### Recommended daily workflow
+
+The whole cycle (backfill candles → aggregate snapshots → status → optional
+analyze) is wrapped in one helper. Use `--dry-run` to print the exact commands
+first:
+
+```powershell
+python -m scripts.run_order_book_research_cycle --market-data-source production --symbol BTCUSDT --timeframes 1m,5m,15m --analyze --dry-run
+python -m scripts.run_order_book_research_cycle --market-data-source production --symbol BTCUSDT --timeframes 1m,5m,15m --analyze
+```
+
+A practical routine:
+1. Keep `scripts.collect_order_book_features` running continuously (background
+   process or scheduled task).
+2. Once a day (or before any analysis), run `run_order_book_research_cycle`. It
+   backfills recent candles so the snapshots' buckets have closed candles, then
+   aggregates, then reports readiness.
+3. Only trust `analyze_market_features` output once the status report says
+   `ready` for the timeframe you care about.
+
+### How long should the collector run?
+
+Long. At 5-second polling, a single 5m candle bucket holds ~60 snapshots, but a
+statistically meaningful forward-return study needs **hundreds of closed buckets
+with following candles**. That is days of continuous collection for 5m/15m, and
+the `--min-feature-samples` threshold (default 100) is there to refuse to take
+small samples seriously.
+
+### Why `sample_size=0` is expected at the start — and when analysis becomes meaningful
+
+At the beginning every order-book feature shows `sample_size=0`, and the
+analyzer now says *why* precisely, instead of a vague "no data":
+- `no_collected_order_book_data` — no snapshots aggregated for this feature yet.
+- `feature_rows_exist_but_no_forward_returns_yet` — buckets exist but sit at the
+  end of the series, so there are no later candles to measure a forward return.
+- `not_enough_samples` — below `--min-feature-samples`; results are not
+  trustworthy yet.
+
+Analyzing order-book imbalance is only meaningful once a timeframe reports
+`ready` (i.e. at least `--min-feature-samples` order-book buckets each have 6
+following candles). Before that, **any conclusion is premature** — which is the
+honest status today.
