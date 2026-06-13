@@ -40,7 +40,6 @@ dist/
 data/
 
 # Generated reports
-reports/
 *.csv
 
 # Claude Code local settings
