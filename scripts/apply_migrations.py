@@ -19,6 +19,7 @@ async def main() -> None:
     market_features_migration_path = migrations_dir / "003_market_features.sql"
     order_book_migration_path = migrations_dir / "004_order_book_snapshots.sql"
     collector_runs_migration_path = migrations_dir / "005_order_book_collector_runs.sql"
+    trade_pressure_migration_path = migrations_dir / "006_trade_pressure_features.sql"
     timescale_migration_path = migrations_dir / "002_timescale_optional.sql"
 
     db = Database(settings.database_url)
@@ -35,6 +36,9 @@ async def main() -> None:
 
         await db.apply_migration_file(collector_runs_migration_path)
         logger.info("db_migration_applied", migration=str(collector_runs_migration_path))
+
+        await db.apply_migration_file(trade_pressure_migration_path)
+        logger.info("db_migration_applied", migration=str(trade_pressure_migration_path))
 
         if settings.database_use_timescaledb:
             await db.apply_migration_file(timescale_migration_path)

@@ -127,6 +127,107 @@ class BinanceRestClient:
         ordered = [by_open_time[key] for key in sorted(by_open_time)]
         return ordered[-limit:]
 
+    async def get_agg_trades(
+        self,
+        *,
+        symbol: str,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        from_id: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Fetch Binance aggregate trades.
+
+        This endpoint is public and historical/database-backed. It is not order
+        book data. It lets V26 build historical trade-pressure features without
+        fabricating historical depth.
+        """
+        if limit <= 0:
+            return []
+        params: dict[str, Any] = {"symbol": symbol.upper(), "limit": min(limit, 1000)}
+        if from_id is not None:
+            params["fromId"] = from_id
+        else:
+            if start_time_ms is not None:
+                params["startTime"] = start_time_ms
+            if end_time_ms is not None:
+                params["endTime"] = end_time_ms
+
+        response = await self.client.get(f"{self.base_url}/v3/aggTrades", params=params)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, list):
+            raise ValueError(f"Unexpected Binance aggTrades response: {data!r}")
+        return data
+
+    async def get_historical_agg_trades(
+        self,
+        *,
+        symbol: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        limit_per_request: int = 1000,
+        max_requests: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Page aggregate trades oldest -> newest over a time window.
+
+        First request uses start/end. Later requests use fromId so we do not skip
+        trades when many trades share a timestamp. Rows outside the requested
+        window are filtered out.
+        """
+        if start_time_ms >= end_time_ms:
+            return []
+        safe_limit = min(max(limit_per_request, 1), 1000)
+        rows_by_id: dict[int, dict[str, Any]] = {}
+        from_id: int | None = None
+        previous_max_id: int | None = None
+        requests = 0
+
+        while True:
+            if max_requests is not None and requests >= max_requests:
+                logger.warning("binance_agg_trades_max_requests_reached", max_requests=max_requests)
+                break
+            raw = await self.get_agg_trades(
+                symbol=symbol,
+                start_time_ms=start_time_ms if from_id is None else None,
+                end_time_ms=end_time_ms if from_id is None else None,
+                from_id=from_id,
+                limit=safe_limit,
+            )
+            requests += 1
+            if not raw:
+                break
+
+            max_id: int | None = None
+            saw_in_window = False
+            all_after_end = True
+            for item in raw:
+                trade_id = int(item["a"])
+                trade_time = int(item["T"])
+                max_id = trade_id if max_id is None else max(max_id, trade_id)
+                if trade_time <= end_time_ms:
+                    all_after_end = False
+                if start_time_ms <= trade_time <= end_time_ms:
+                    rows_by_id[trade_id] = item
+                    saw_in_window = True
+
+            if max_id is None:
+                break
+            if previous_max_id is not None and max_id <= previous_max_id:
+                logger.warning("binance_agg_trades_stopped_no_progress", max_id=max_id)
+                break
+            previous_max_id = max_id
+            from_id = max_id + 1
+
+            if all_after_end:
+                break
+            if len(raw) < safe_limit and not saw_in_window:
+                break
+            if len(raw) < safe_limit:
+                break
+
+        return [rows_by_id[key] for key in sorted(rows_by_id)]
+
     async def get_order_book(self, *, symbol: str, limit: int = 100) -> dict[str, Any]:
         """Fetch the CURRENT order book depth snapshot.
 

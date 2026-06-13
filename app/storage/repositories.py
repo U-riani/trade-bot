@@ -281,6 +281,12 @@ class TradingRepository:
             """
             SELECT exchange, symbol, timeframe, open_time, close_time, close_price, volume,
                    quote_volume, taker_buy_base_volume, taker_buy_quote_volume, taker_buy_ratio,
+                   trade_count, taker_buy_trade_count, taker_sell_trade_count,
+                   taker_buy_base_volume_trades, taker_sell_base_volume_trades,
+                   taker_buy_quote_volume_trades, taker_sell_quote_volume_trades,
+                   taker_net_base_volume, taker_net_quote_volume,
+                   taker_buy_trade_ratio, taker_buy_base_ratio_trades, taker_buy_quote_ratio_trades,
+                   avg_trade_quote_size, trade_count_intensity, quote_volume_intensity,
                    order_book_bid_volume, order_book_ask_volume, order_book_imbalance, spread_pct,
                    imbalance_top_5, imbalance_top_10, imbalance_top_20, order_book_snapshot_count
             FROM market_features
@@ -313,6 +319,21 @@ class TradingRepository:
                 taker_buy_base_volume=_opt_float(row["taker_buy_base_volume"]),
                 taker_buy_quote_volume=_opt_float(row["taker_buy_quote_volume"]),
                 taker_buy_ratio=_opt_float(row["taker_buy_ratio"]),
+                trade_count=_opt_int(row["trade_count"]),
+                taker_buy_trade_count=_opt_int(row["taker_buy_trade_count"]),
+                taker_sell_trade_count=_opt_int(row["taker_sell_trade_count"]),
+                taker_buy_base_volume_trades=_opt_float(row["taker_buy_base_volume_trades"]),
+                taker_sell_base_volume_trades=_opt_float(row["taker_sell_base_volume_trades"]),
+                taker_buy_quote_volume_trades=_opt_float(row["taker_buy_quote_volume_trades"]),
+                taker_sell_quote_volume_trades=_opt_float(row["taker_sell_quote_volume_trades"]),
+                taker_net_base_volume=_opt_float(row["taker_net_base_volume"]),
+                taker_net_quote_volume=_opt_float(row["taker_net_quote_volume"]),
+                taker_buy_trade_ratio=_opt_float(row["taker_buy_trade_ratio"]),
+                taker_buy_base_ratio_trades=_opt_float(row["taker_buy_base_ratio_trades"]),
+                taker_buy_quote_ratio_trades=_opt_float(row["taker_buy_quote_ratio_trades"]),
+                avg_trade_quote_size=_opt_float(row["avg_trade_quote_size"]),
+                trade_count_intensity=_opt_float(row["trade_count_intensity"]),
+                quote_volume_intensity=_opt_float(row["quote_volume_intensity"]),
                 order_book_bid_volume=_opt_float(row["order_book_bid_volume"]),
                 order_book_ask_volume=_opt_float(row["order_book_ask_volume"]),
                 order_book_imbalance=_opt_float(row["order_book_imbalance"]),
@@ -472,6 +493,74 @@ class TradingRepository:
                     row.imbalance_top_10,
                     row.imbalance_top_20,
                     row.order_book_snapshot_count,
+                )
+                for row in rows
+            ],
+        )
+        return len(rows)
+
+    async def upsert_market_features_trade_pressure(self, rows: list[MarketFeatures]) -> int:
+        """Insert/update only V26 aggregate-trade pressure columns.
+
+        Existing candle/kline/order-book columns are intentionally left untouched
+        on conflict so V26 cannot corrupt V23/V24/V25 order-book data.
+        """
+        if not rows:
+            return 0
+        pool = self.db.require_pool()
+        await pool.executemany(
+            """
+            INSERT INTO market_features(
+                exchange, symbol, timeframe, open_time, close_time, close_price, volume,
+                trade_count, taker_buy_trade_count, taker_sell_trade_count,
+                taker_buy_base_volume_trades, taker_sell_base_volume_trades,
+                taker_buy_quote_volume_trades, taker_sell_quote_volume_trades,
+                taker_net_base_volume, taker_net_quote_volume,
+                taker_buy_trade_ratio, taker_buy_base_ratio_trades, taker_buy_quote_ratio_trades,
+                avg_trade_quote_size, trade_count_intensity, quote_volume_intensity
+            )
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+            ON CONFLICT (exchange, symbol, timeframe, close_time) DO UPDATE SET
+                trade_count = EXCLUDED.trade_count,
+                taker_buy_trade_count = EXCLUDED.taker_buy_trade_count,
+                taker_sell_trade_count = EXCLUDED.taker_sell_trade_count,
+                taker_buy_base_volume_trades = EXCLUDED.taker_buy_base_volume_trades,
+                taker_sell_base_volume_trades = EXCLUDED.taker_sell_base_volume_trades,
+                taker_buy_quote_volume_trades = EXCLUDED.taker_buy_quote_volume_trades,
+                taker_sell_quote_volume_trades = EXCLUDED.taker_sell_quote_volume_trades,
+                taker_net_base_volume = EXCLUDED.taker_net_base_volume,
+                taker_net_quote_volume = EXCLUDED.taker_net_quote_volume,
+                taker_buy_trade_ratio = EXCLUDED.taker_buy_trade_ratio,
+                taker_buy_base_ratio_trades = EXCLUDED.taker_buy_base_ratio_trades,
+                taker_buy_quote_ratio_trades = EXCLUDED.taker_buy_quote_ratio_trades,
+                avg_trade_quote_size = EXCLUDED.avg_trade_quote_size,
+                trade_count_intensity = EXCLUDED.trade_count_intensity,
+                quote_volume_intensity = EXCLUDED.quote_volume_intensity
+            """,
+            [
+                (
+                    row.exchange,
+                    row.symbol,
+                    row.timeframe,
+                    row.open_time,
+                    row.close_time,
+                    row.close_price,
+                    row.volume,
+                    row.trade_count,
+                    row.taker_buy_trade_count,
+                    row.taker_sell_trade_count,
+                    row.taker_buy_base_volume_trades,
+                    row.taker_sell_base_volume_trades,
+                    row.taker_buy_quote_volume_trades,
+                    row.taker_sell_quote_volume_trades,
+                    row.taker_net_base_volume,
+                    row.taker_net_quote_volume,
+                    row.taker_buy_trade_ratio,
+                    row.taker_buy_base_ratio_trades,
+                    row.taker_buy_quote_ratio_trades,
+                    row.avg_trade_quote_size,
+                    row.trade_count_intensity,
+                    row.quote_volume_intensity,
                 )
                 for row in rows
             ],

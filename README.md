@@ -1326,3 +1326,27 @@ gap-free dataset still says nothing about whether order-book imbalance predicts
 returns — that requires the forward-return analysis to reach `ready`, which needs
 weeks of data. **V25 makes the collection reliable; it does not, and cannot yet,
 judge predictive value or profitability.**
+
+## V26 historical trade-pressure features and comparison lab
+
+V26 adds historical Binance aggregate-trade pressure features so research can move
+forward while live order-book data continues to accumulate.
+
+Important limitation: Binance Spot REST does **not** provide historical order-book
+depth. V26 does not fabricate historical order-book imbalance and does not attach
+current order-book snapshots to past candles.
+
+Recommended flow:
+
+```powershell
+python -m scripts.apply_migrations
+python -m scripts.backfill_candles --market-data-source production --symbol BTCUSDT --timeframe 1m --limit 50000
+python -m scripts.build_market_features --market-data-source production --source db --limit 50000 --timeframes 1m,5m,15m
+python -m scripts.backfill_trade_pressure_features --market-data-source production --symbol BTCUSDT --lookback-hours 24 --timeframes 1m,5m,15m
+python -m scripts.analyze_market_features --market-data-source production --source db --limit 50000 --timeframes 1m,5m,15m --min-feature-samples 100 --export-json reports/feature_analysis_v26.json --export-csv reports/feature_analysis_v26.csv
+python -m scripts.compare_feature_groups --market-data-source production --source db --limit 50000 --timeframes 1m,5m,15m --export-json reports/feature_group_comparison_v26.json --export-csv reports/feature_group_comparison_v26.csv
+```
+
+V26 does not build a strategy. It adds historical trade-pressure features and
+comparison tooling while live order-book data continues to accumulate.
+

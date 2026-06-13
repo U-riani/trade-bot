@@ -92,6 +92,15 @@ def _build_feature_series(
         "upper_wick_pct": [candle_upper_wick_pct(c) for c in candles],
         "lower_wick_pct": [candle_lower_wick_pct(c) for c in candles],
         "taker_buy_ratio": _feature_attr("taker_buy_ratio"),
+        # V26 historical aggregate-trade pressure features.
+        "trade_count_intensity": _feature_attr("trade_count_intensity"),
+        "quote_volume_intensity": _feature_attr("quote_volume_intensity"),
+        "taker_buy_trade_ratio": _feature_attr("taker_buy_trade_ratio"),
+        "taker_buy_base_ratio_trades": _feature_attr("taker_buy_base_ratio_trades"),
+        "taker_buy_quote_ratio_trades": _feature_attr("taker_buy_quote_ratio_trades"),
+        "taker_net_base_volume": _feature_attr("taker_net_base_volume"),
+        "taker_net_quote_volume": _feature_attr("taker_net_quote_volume"),
+        "avg_trade_quote_size": _feature_attr("avg_trade_quote_size"),
         # V23 live order-book features. NULL until enough snapshots are
         # collected and aggregated, so these report sample_size 0 honestly until
         # the forward-looking dataset has accumulated.

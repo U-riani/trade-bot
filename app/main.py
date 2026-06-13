@@ -302,6 +302,10 @@ async def setup_database(settings: Settings) -> tuple[Database | None, TradingRe
         await db.apply_migration_file(collector_runs_migration_path)
         logger.info("db_migration_applied", migration=str(collector_runs_migration_path))
 
+        trade_pressure_migration_path = migrations_dir / "006_trade_pressure_features.sql"
+        await db.apply_migration_file(trade_pressure_migration_path)
+        logger.info("db_migration_applied", migration=str(trade_pressure_migration_path))
+
         if settings.database_use_timescaledb:
             timescale_migration_path = migrations_dir / "002_timescale_optional.sql"
             await db.apply_migration_file(timescale_migration_path)

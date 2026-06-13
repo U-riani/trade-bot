@@ -42,6 +42,23 @@ class MarketFeatures:
     taker_buy_base_volume: float | None = None
     taker_buy_quote_volume: float | None = None
     taker_buy_ratio: float | None = None
+    # V26 historical aggregate-trade pressure fields. These are separate from
+    # kline taker fields and from live order-book fields.
+    trade_count: int | None = None
+    taker_buy_trade_count: int | None = None
+    taker_sell_trade_count: int | None = None
+    taker_buy_base_volume_trades: float | None = None
+    taker_sell_base_volume_trades: float | None = None
+    taker_buy_quote_volume_trades: float | None = None
+    taker_sell_quote_volume_trades: float | None = None
+    taker_net_base_volume: float | None = None
+    taker_net_quote_volume: float | None = None
+    taker_buy_trade_ratio: float | None = None
+    taker_buy_base_ratio_trades: float | None = None
+    taker_buy_quote_ratio_trades: float | None = None
+    avg_trade_quote_size: float | None = None
+    trade_count_intensity: float | None = None
+    quote_volume_intensity: float | None = None
     order_book_bid_volume: float | None = None
     order_book_ask_volume: float | None = None
     order_book_imbalance: float | None = None
