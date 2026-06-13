@@ -1350,3 +1350,25 @@ python -m scripts.compare_feature_groups --market-data-source production --sourc
 V26 does not build a strategy. It adds historical trade-pressure features and
 comparison tooling while live order-book data continues to accumulate.
 
+## V26.1 sample-safe feature reporting
+
+V26.1 fixes the main reporting trap found after V26: `combined_available` can no
+longer select a tiny-sample order-book feature while showing a large candle-based
+sample size. Group winners are now chosen only from features that meet
+`--min-feature-samples`.
+
+Recommended report command:
+
+```powershell
+python -m scripts.compare_feature_groups --market-data-source production --source db --limit 50000 --timeframes 1m,5m,15m --min-feature-samples 100 --export-json reports/feature_group_comparison_v26_1.json --export-csv reports/feature_group_comparison_v26_1.csv --export-candidates-json reports/feature_candidates_v26_1.json --export-candidates-csv reports/feature_candidates_v26_1.csv
+```
+
+The candidate export is still research-only. It ranks hypotheses and marks each
+feature as:
+- `candidate_research_only`
+- `weak_signal`
+- `not_enough_samples`
+
+V26.1 does not build a strategy. It does not trade. It does not claim profit.
+It only makes the research report harder to fool, which is rude to bad ideas and
+therefore useful.
