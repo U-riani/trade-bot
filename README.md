@@ -1372,3 +1372,37 @@ feature as:
 V26.1 does not build a strategy. It does not trade. It does not claim profit.
 It only makes the research report harder to fool, which is rude to bad ideas and
 therefore useful.
+
+## V27 order-book threshold strategy research prototype
+
+V27 turns the V26/V26.1 feature candidates into a deliberately small
+research-only strategy prototype. It does not place live orders, does not emit
+live trading signals, and does not claim profitability. The goal is to answer a
+narrow business question: is the order-book signal interesting enough to keep
+building the bot?
+
+The first candidate is based on the V26.1 report where 5m `imbalance_top_20`
+was the strongest current feature candidate. The prototype uses a fixed-horizon
+long rule:
+
+1. Learn an entry threshold from the train portion of the available feature rows.
+2. If a feature value at candle `i` is above the threshold, schedule a BUY at
+   candle `i+1`.
+3. Exit after a fixed number of future bars.
+4. Compare against no-trade and order-sized buy-and-hold after fees/slippage.
+
+Example workflow:
+
+```powershell
+python -m scripts.backfill_candles --market-data-source production --symbol BTCUSDT --timeframe 1m --limit 5000
+
+python -m scripts.aggregate_order_book_features --market-data-source production --source db --symbol BTCUSDT --candle-limit 50000 --snapshot-limit 2000000 --timeframes 1m,5m,15m
+
+python -m scripts.backtest_order_book_strategy --market-data-source production --timeframe 5m --limit 50000 --features imbalance_top_20,order_book_imbalance,imbalance_top_10,imbalance_top_5 --horizons 1,3,6 --entry-quantiles 0.6,0.7,0.8 --min-feature-samples 100 --export-json reports/order_book_strategy_v27.json --export-csv reports/order_book_strategy_v27.csv
+```
+
+Interpretation rule: a good V27 result is not permission to trade. It only means
+we should continue to V27.1/V28 with stability checks, more samples, and stricter
+walk-forward validation. A bad result means the current order-book idea probably
+is not worth turning into execution logic yet.
+
