@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from app.market.models import Candle
+
 from app.backtesting.multitimeframe_pullback_strategy import (
     MultiTimeframePullbackConfig,
     PullbackSetup,
@@ -127,3 +129,26 @@ def test_price_setup_cache_does_not_use_missing_future_higher_timeframe_data() -
     )
     assert len(cache) == len(base)
     assert all(item.reason == "missing_higher_timeframe_candle" for item in cache)
+
+
+def test_v29_1_merge_preserves_complete_price_timeline() -> None:
+    from scripts.backtest_multitimeframe_pullback_strategy import _merge_candles_with_observations
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    candles = [
+        Candle(
+            exchange="binance_spot", symbol="BTCUSDT", timeframe="1m",
+            open_time=start + timedelta(minutes=index),
+            close_time=start + timedelta(minutes=index + 1) - timedelta(milliseconds=1),
+            open=100 + index, high=101 + index, low=99 + index, close=100 + index, volume=1.0, is_closed=True,
+        )
+        for index in range(3)
+    ]
+    observation = _row(1, close=101, imbalance=0.42)
+    rows = _merge_candles_with_observations(candles, [observation])
+
+    assert len(rows) == 3
+    assert [row.close_price for row in rows] == [100, 101, 102]
+    assert rows[0].imbalance_top_20 is None
+    assert rows[1].imbalance_top_20 == 0.42
+    assert rows[2].imbalance_top_20 is None

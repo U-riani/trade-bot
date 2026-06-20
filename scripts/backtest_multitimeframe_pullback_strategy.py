@@ -15,7 +15,7 @@ import asyncio
 import csv
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -28,9 +28,11 @@ from app.backtesting.multitimeframe_pullback_strategy import (
     run_multitimeframe_pullback_backtest,
 )
 from app.backtesting.order_book_strategy import quantile_threshold, rows_with_feature
+from app.backtesting.resample import resample_candles
 from app.config.logging import configure_logging, get_logger
 from app.config.settings import get_settings
 from app.market.features import MarketFeatures
+from app.market.models import Candle
 from app.storage.db import Database
 from app.storage.repositories import TradingRepository
 from scripts.backtest_strategy import _decimal_to_str, _resolve_market_data_source
@@ -105,22 +107,93 @@ def _parse_horizons(value: str) -> list[int]:
     return horizons
 
 
-async def _load_rows(timeframe: str, args: argparse.Namespace) -> tuple[list[MarketFeatures], str]:
+def _price_feature_row(candle: Candle, observation: MarketFeatures | None = None) -> MarketFeatures:
+    """Represent a complete candle while preserving any observed order-book fields.
+
+    Price chronology comes from the candles table.  Live depth observations are
+    joined by close time only, so absent depth does not erase a real candle.
+    """
+
+    if observation is not None:
+        return replace(
+            observation,
+            timeframe=candle.timeframe,
+            open_time=candle.open_time,
+            close_time=candle.close_time,
+            close_price=candle.close,
+            volume=candle.volume,
+        )
+    return MarketFeatures(
+        exchange=candle.exchange,
+        symbol=candle.symbol,
+        timeframe=candle.timeframe,
+        open_time=candle.open_time,
+        close_time=candle.close_time,
+        close_price=candle.close,
+        volume=candle.volume,
+    )
+
+
+def _merge_candles_with_observations(
+    candles: list[Candle], observations: list[MarketFeatures]
+) -> list[MarketFeatures]:
+    """Return one row for every price candle, enriched only where depth was observed."""
+
+    observed_by_close = {row.close_time: row for row in observations}
+    return [_price_feature_row(candle, observed_by_close.get(candle.close_time)) for candle in candles]
+
+
+async def _load_price_timelines(
+    args: argparse.Namespace,
+) -> tuple[list[MarketFeatures], list[MarketFeatures], list[MarketFeatures], str]:
+    """Load complete 1m prices, then derive complete 5m/15m price timelines.
+
+    V29 originally used sparse ``market_features`` rows for higher-timeframe
+    indicator history.  Those rows exist only when aggregation produced a feature,
+    so missing depth snapshots were incorrectly treated as missing candles.  The
+    strategy now uses complete candle data for price logic and joins order-book
+    observations solely onto the 1m entry timeline.
+    """
+
     settings = get_settings()
     _source, _use_testnet, exchange = _resolve_market_data_source(args.market_data_source)
     db = Database(settings.database_url)
     await db.connect()
     try:
-        rows = await TradingRepository(db).load_market_features(
+        repository = TradingRepository(db)
+        candles_1m = await repository.load_recent_candles(
             exchange=exchange,
             symbol=settings.normalized_symbol,
-            timeframe=timeframe,
+            timeframe="1m",
+            limit=args.limit,
+        )
+        observations_1m = await repository.load_market_features(
+            exchange=exchange,
+            symbol=settings.normalized_symbol,
+            timeframe="1m",
             limit=args.limit,
         )
     finally:
         await db.close()
-    logger.info("v29_feature_rows_loaded", timeframe=timeframe, rows=len(rows), symbol=settings.normalized_symbol)
-    return rows, settings.normalized_symbol
+
+    if not candles_1m:
+        raise SystemExit("No 1m candles available for V29.1")
+
+    entry_rows = _merge_candles_with_observations(candles_1m, observations_1m)
+    pullback_rows = [_price_feature_row(candle) for candle in resample_candles(candles_1m, target_timeframe="5m")]
+    trend_rows = [_price_feature_row(candle) for candle in resample_candles(candles_1m, target_timeframe="15m")]
+
+    logger.info(
+        "v29_price_timelines_loaded",
+        symbol=settings.normalized_symbol,
+        candles_1m=len(candles_1m),
+        observed_order_book_rows=len(observations_1m),
+        entry_rows=len(entry_rows),
+        pullback_rows=len(pullback_rows),
+        trend_rows=len(trend_rows),
+        note="price timelines come from complete candles; order-book values are joined only at 1m closes",
+    )
+    return entry_rows, pullback_rows, trend_rows, settings.normalized_symbol
 
 
 def _coverage_split(rows: list[MarketFeatures], *, feature: str, train_ratio: Decimal) -> CoverageSplit:
@@ -445,9 +518,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         note="research-only; net profitability after modeled costs is the criterion",
     )
 
-    base_rows, symbol = await _load_rows("1m", args)
-    pullback_rows, _ = await _load_rows("5m", args)
-    trend_rows, _ = await _load_rows("15m", args)
+    base_rows, pullback_rows, trend_rows, symbol = await _load_price_timelines(args)
 
     comparison_rows: list[V29ComparisonRow] = []
     for feature in features:
