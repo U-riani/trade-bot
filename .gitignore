@@ -44,3 +44,10 @@ data/
 
 # Claude Code local settings
 .claude/
+
+# Local one-off ChatGPT update packages
+apply_*_update.py
+v*_payload/
+v*_update/
+v*_package/
+v*inspect/
