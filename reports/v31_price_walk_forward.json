@@ -1,0 +1,171 @@
+{
+  "strategy_name": "v31_price_only_walk_forward",
+  "research_only": true,
+  "nautilus_trader_reference": {
+    "used_as": "event-driven research discipline reference",
+    "runtime_dependency": false,
+    "reason": "V31 retains the project's existing deterministic DB/candle pipeline so results remain comparable. A separate NautilusTrader parity run is only appropriate after a candidate survives this walk-forward gate."
+  },
+  "protocol": {
+    "signal_timing": "completed 5m/15m bars only",
+    "entry_timing": "next contiguous 1m open",
+    "exit_timing": "fixed horizon at 1m close",
+    "cost_model": {
+      "fee_rate_pct_per_side": "0.1",
+      "slippage_pct_per_side": "0.02"
+    },
+    "walk_forward": {
+      "train_bars": 30000,
+      "validation_bars": 10000,
+      "step_bars": 10000,
+      "fold_count": 7
+    },
+    "pass_criteria": {
+      "minimum_validation_trades": 10,
+      "minimum_selected_folds": 3,
+      "minimum_profitable_validation_folds": 2,
+      "net_pnl": "> 0",
+      "profit_factor": "> 1",
+      "largest_winner_share": "<= 50% of gross profit",
+      "benchmark": "must beat cumulative buy-and-hold over validation folds"
+    }
+  },
+  "candidate_catalog_size": 18,
+  "outcome": {
+    "selected_fold_count": 0,
+    "profitable_validation_folds": 0,
+    "cumulative_buy_and_hold_return_pct": "-19.57265230220460662705838963",
+    "aggregate_validation": {
+      "initial_equity": "1000",
+      "final_equity": "1000",
+      "net_pnl": "0",
+      "return_pct": "0",
+      "round_trips": 0,
+      "winning_trades": 0,
+      "losing_trades": 0,
+      "win_rate": 0.0,
+      "profit_factor": null,
+      "total_fees": "0",
+      "max_drawdown": "0",
+      "largest_winner_share": null,
+      "skipped_gap_signals": 0,
+      "skipped_end_signals": 0,
+      "skipped_overlap_signals": 0
+    },
+    "verdict": "not_enough_train_qualified_folds",
+    "folds": [
+      {
+        "fold_number": 1,
+        "train": {
+          "start_index": 0,
+          "end_index_exclusive": 30000
+        },
+        "validation": {
+          "start_index": 30000,
+          "end_index_exclusive": 40000
+        },
+        "selected_candidate": null,
+        "selection_reason": "no_train_candidate_met_minimum_profit_and_trade_requirements",
+        "train_result": null,
+        "validation_result": null,
+        "buy_and_hold_return_pct": "3.113459234727433861068616200"
+      },
+      {
+        "fold_number": 2,
+        "train": {
+          "start_index": 10000,
+          "end_index_exclusive": 40000
+        },
+        "validation": {
+          "start_index": 40000,
+          "end_index_exclusive": 50000
+        },
+        "selected_candidate": null,
+        "selection_reason": "no_train_candidate_met_minimum_profit_and_trade_requirements",
+        "train_result": null,
+        "validation_result": null,
+        "buy_and_hold_return_pct": "-3.626725653032704974042063730"
+      },
+      {
+        "fold_number": 3,
+        "train": {
+          "start_index": 20000,
+          "end_index_exclusive": 50000
+        },
+        "validation": {
+          "start_index": 50000,
+          "end_index_exclusive": 60000
+        },
+        "selected_candidate": null,
+        "selection_reason": "no_train_candidate_met_minimum_profit_and_trade_requirements",
+        "train_result": null,
+        "validation_result": null,
+        "buy_and_hold_return_pct": "-1.673356124757834691542305390"
+      },
+      {
+        "fold_number": 4,
+        "train": {
+          "start_index": 30000,
+          "end_index_exclusive": 60000
+        },
+        "validation": {
+          "start_index": 60000,
+          "end_index_exclusive": 70000
+        },
+        "selected_candidate": null,
+        "selection_reason": "no_train_candidate_met_minimum_profit_and_trade_requirements",
+        "train_result": null,
+        "validation_result": null,
+        "buy_and_hold_return_pct": "-3.995898608086779480205384970"
+      },
+      {
+        "fold_number": 5,
+        "train": {
+          "start_index": 40000,
+          "end_index_exclusive": 70000
+        },
+        "validation": {
+          "start_index": 70000,
+          "end_index_exclusive": 80000
+        },
+        "selected_candidate": null,
+        "selection_reason": "no_train_candidate_met_minimum_profit_and_trade_requirements",
+        "train_result": null,
+        "validation_result": null,
+        "buy_and_hold_return_pct": "-18.10017059374596112306870791"
+      },
+      {
+        "fold_number": 6,
+        "train": {
+          "start_index": 50000,
+          "end_index_exclusive": 80000
+        },
+        "validation": {
+          "start_index": 80000,
+          "end_index_exclusive": 90000
+        },
+        "selected_candidate": null,
+        "selection_reason": "no_train_candidate_met_minimum_profit_and_trade_requirements",
+        "train_result": null,
+        "validation_result": null,
+        "buy_and_hold_return_pct": "5.709084244181594971982195900"
+      },
+      {
+        "fold_number": 7,
+        "train": {
+          "start_index": 60000,
+          "end_index_exclusive": 90000
+        },
+        "validation": {
+          "start_index": 90000,
+          "end_index_exclusive": 100000
+        },
+        "selected_candidate": null,
+        "selection_reason": "no_train_candidate_met_minimum_profit_and_trade_requirements",
+        "train_result": null,
+        "validation_result": null,
+        "buy_and_hold_return_pct": "-0.9680193719625461964793853700"
+      }
+    ]
+  }
+}
