@@ -12,6 +12,7 @@ from app.backtesting.order_book_strategy import (
     rows_with_feature,
     run_order_book_threshold_backtest_with_diagnostics,
     split_feature_rows,
+    split_rows_by_feature_coverage,
 )
 from app.market.features import MarketFeatures
 
@@ -92,3 +93,25 @@ def test_split_feature_rows_preserves_all_rows_chronologically() -> None:
     assert len(train) == 7
     assert len(validation) == 3
     assert train[-1].close_time < validation[0].close_time
+
+
+def test_split_rows_by_feature_coverage_uses_observed_window_not_old_history() -> None:
+    rows = [
+        _row(0, imbalance=None),
+        _row(1, imbalance=None),
+        _row(2, imbalance=0.1),
+        _row(3, imbalance=None),
+        _row(4, imbalance=0.2),
+        _row(5, imbalance=None),
+        _row(6, imbalance=0.3),
+        _row(7, imbalance=None),
+        _row(8, imbalance=0.4),
+    ]
+    coverage = split_rows_by_feature_coverage(
+        rows, feature_name="imbalance_top_20", train_ratio=Decimal("0.5")
+    )
+    assert coverage.full_rows[0].close_time == rows[2].close_time
+    assert coverage.full_rows[-1].close_time == rows[8].close_time
+    assert [feature_value(row, "imbalance_top_20") for row in rows_with_feature(coverage.train_rows, "imbalance_top_20")] == [0.1, 0.2]
+    assert [feature_value(row, "imbalance_top_20") for row in rows_with_feature(coverage.validation_rows, "imbalance_top_20")] == [0.3, 0.4]
+    assert coverage.train_rows[-1].close_time < coverage.validation_rows[0].close_time

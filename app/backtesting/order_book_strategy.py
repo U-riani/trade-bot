@@ -50,6 +50,18 @@ class OrderBookBacktestOutcome:
     diagnostics: BacktestDiagnostics
 
 
+@dataclass(slots=True, frozen=True)
+class FeatureCoverageSplit:
+    """Chronological split inside the real order-book observation period."""
+
+    full_rows: list[MarketFeatures]
+    train_rows: list[MarketFeatures]
+    validation_rows: list[MarketFeatures]
+    coverage_start: object
+    split_time: object
+    coverage_end: object
+
+
 @dataclass(slots=True)
 class _OpenPosition:
     exit_index: int
@@ -99,6 +111,47 @@ def split_feature_rows(rows: list[MarketFeatures], *, train_ratio: Decimal) -> t
     if split_index <= 0 or split_index >= len(sorted_rows):
         raise ValueError("not enough rows to split train/validation sets")
     return sorted_rows[:split_index], sorted_rows[split_index:]
+
+
+def split_rows_by_feature_coverage(
+    rows: list[MarketFeatures],
+    *,
+    feature_name: str,
+    train_ratio: Decimal,
+) -> FeatureCoverageSplit:
+    """Split chronologically inside actual feature coverage, not old candle history.
+
+    The replay timeline retains every candle row from first observed feature through
+    last observed feature. Threshold learning uses the earliest feature observations
+    only, while gap-safe execution still rejects paths crossing missing candles.
+    """
+
+    if train_ratio <= 0 or train_ratio >= 1:
+        raise ValueError("train_ratio must be greater than 0 and smaller than 1")
+
+    ordered = sorted(rows, key=lambda row: row.close_time)
+    observed = rows_with_feature(ordered, feature_name)
+    split_index = int(len(observed) * float(train_ratio))
+    if split_index <= 0 or split_index >= len(observed):
+        raise ValueError("not enough feature observations to split train/validation sets")
+
+    coverage_start = observed[0].close_time
+    split_time = observed[split_index].close_time
+    coverage_end = observed[-1].close_time
+    full_rows = [row for row in ordered if coverage_start <= row.close_time <= coverage_end]
+    train_rows = [row for row in full_rows if row.close_time < split_time]
+    validation_rows = [row for row in full_rows if row.close_time >= split_time]
+    if not train_rows or not validation_rows:
+        raise ValueError("feature coverage split produced an empty train or validation timeline")
+
+    return FeatureCoverageSplit(
+        full_rows=full_rows,
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        coverage_start=coverage_start,
+        split_time=split_time,
+        coverage_end=coverage_end,
+    )
 
 
 def _expected_seconds(timeframe: str) -> int:

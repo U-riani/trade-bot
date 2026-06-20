@@ -26,7 +26,7 @@ from app.backtesting.order_book_strategy import (
     quantile_threshold,
     rows_with_feature,
     run_order_book_threshold_backtest_with_diagnostics,
-    split_feature_rows,
+    split_rows_by_feature_coverage,
 )
 from app.config.logging import configure_logging, get_logger
 from app.config.settings import get_settings
@@ -220,12 +220,43 @@ def _build_rows_for_feature(
         logger.info("order_book_strategy_feature_skipped", timeframe=timeframe, feature=feature, sample_size=len(present), reason="not_enough_samples")
         return []
 
-    train_rows, validation_rows = split_feature_rows(ordered, train_ratio=args.train_ratio)
-    if len(rows_with_feature(train_rows, feature)) < max(1, args.min_feature_samples // 2):
-        logger.info("order_book_strategy_feature_skipped", timeframe=timeframe, feature=feature, reason="not_enough_train_feature_samples")
+    coverage = split_rows_by_feature_coverage(
+        ordered,
+        feature_name=feature,
+        train_ratio=args.train_ratio,
+    )
+    train_rows = coverage.train_rows
+    validation_rows = coverage.validation_rows
+    train_feature_samples = len(rows_with_feature(train_rows, feature))
+    validation_feature_samples = len(rows_with_feature(validation_rows, feature))
+    min_train_feature_samples = max(1, args.min_feature_samples // 2)
+    if train_feature_samples < min_train_feature_samples:
+        logger.info(
+            "order_book_strategy_feature_skipped",
+            timeframe=timeframe,
+            feature=feature,
+            train_feature_samples=train_feature_samples,
+            validation_feature_samples=validation_feature_samples,
+            min_train_feature_samples=min_train_feature_samples,
+            reason="not_enough_train_feature_samples",
+        )
         return []
 
-    segments = {"full": ordered, "train": train_rows, "validation": validation_rows}
+    logger.info(
+        "order_book_strategy_coverage_split",
+        timeframe=timeframe,
+        feature=feature,
+        coverage_start=coverage.coverage_start.isoformat(),
+        split_time=coverage.split_time.isoformat(),
+        coverage_end=coverage.coverage_end.isoformat(),
+        full_timeline_rows=len(coverage.full_rows),
+        train_timeline_rows=len(train_rows),
+        validation_timeline_rows=len(validation_rows),
+        train_feature_samples=train_feature_samples,
+        validation_feature_samples=validation_feature_samples,
+    )
+
+    segments = {"full": coverage.full_rows, "train": train_rows, "validation": validation_rows}
     output: list[OrderBookStrategyRow] = []
     for tail in tails:
         for base_quantile in quantiles:
@@ -253,7 +284,7 @@ def _build_rows_for_feature(
                         entry_threshold=threshold, sample_size=len(rows_with_feature(segment_rows, feature)),
                         strategy_result=outcome.result, buy_hold_result=benchmark, diagnostics=outcome.diagnostics,
                         notes=("Gap-safe research-only fixed-horizon long. Signal at candle i enters at i+1 only when every "
-                               "timestamp through exit is contiguous; threshold learned from train rows only."),
+                               "timestamp through exit is contiguous; threshold learned from the earliest feature-covered train observations only."),
                     ))
     return output
 
