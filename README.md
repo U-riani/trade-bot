@@ -1406,3 +1406,27 @@ we should continue to V27.1/V28 with stability checks, more samples, and stricte
 walk-forward validation. A bad result means the current order-book idea probably
 is not worth turning into execution logic yet.
 
+## V27.2 gap-safe strategy validation
+
+V27.2 corrects a sparse-data problem in the original V27 prototype. A missing
+order-book observation must not compress time: the next stored feature may be
+far later than the next real candle. The V27.2 backtester retains the complete
+market-feature timeline, learns thresholds only from train rows, and skips any
+candidate whose next-candle entry or fixed-horizon exit would cross a timestamp
+gap. Reports include gap counts and skipped signals.
+
+It can test both tails, strictly as research diagnostics:
+
+- `high`: buy after unusually high order-book imbalance.
+- `low`: buy after unusually low imbalance, testing a contrarian hypothesis.
+
+Example:
+
+```powershell
+python -m scripts.backtest_order_book_strategy --market-data-source production --timeframes 1m,5m,15m --limit 50000 --features imbalance_top_20,imbalance_top_5 --entry-tails high,low --entry-quantiles 0.6,0.7,0.8 --horizons 1,3,6 --min-feature-samples 100 --min-trades 5 --export-json reports/order_book_strategy_v27_2.json --export-csv reports/order_book_strategy_v27_2.csv
+```
+
+A positive full-sample row is descriptive only. The decision-relevant rows are
+`segment=validation` after fees/slippage and with enough completed trades. This
+still does not permit live trading.
+

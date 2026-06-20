@@ -1,20 +1,13 @@
-"""V27 research-only order-book threshold strategy backtester.
+"""V27.2 gap-safe order-book threshold strategy research backtester.
 
-This module intentionally does not place orders, emit live signals, or claim an
-edge. It turns the V26/V26.1 feature research into a small, brutally simple
-question:
+V27 compressed the timeline by filtering out rows where an order-book feature was
+missing. That is unsafe for sparse forward-collected data: the next stored
+feature may be minutes or hours later, yet the old backtest treated it as the
+next candle. V27.2 keeps every stored market-feature row, only uses present
+feature values to create signals, and skips any trade whose entry/exit path
+crosses a timestamp gap.
 
-    If a live order-book imbalance feature is high at a candle close, does a
-    fixed-horizon long trade beat no-trade / order-sized buy-and-hold after fees
-    and slippage?
-
-The design is deliberately conservative about time:
-- Feature value at row i is considered known only after that candle closes.
-- Entry happens on row i+1, never on the same row that produced the signal.
-- Exit happens after a fixed number of future bars.
-
-So yes, we do the boring no-lookahead thing, because reality already charges
-fees and does not need help cheating.
+Research only. No live signals, no execution, no profit claim.
 """
 
 from __future__ import annotations
@@ -25,21 +18,40 @@ from math import ceil
 
 from app.backtesting.metrics import BacktestMetrics, BacktestResult, BacktestTrade
 from app.market.features import MarketFeatures
+from app.utils.timeframe import timeframe_to_seconds
 
 
 @dataclass(slots=True, frozen=True)
 class OrderBookThresholdConfig:
-    """Config for one research-only long threshold strategy."""
+    """One fixed-horizon long research configuration."""
 
     feature_name: str
     entry_threshold: float
     horizon_bars: int
     strategy_name: str
+    timeframe: str = "5m"
+    entry_tail: str = "high"  # high => feature >= threshold; low => feature <= threshold
+
+
+@dataclass(slots=True, frozen=True)
+class BacktestDiagnostics:
+    total_rows: int
+    feature_observations: int
+    gap_count: int
+    max_gap_seconds: float
+    signal_candidates: int
+    skipped_gap_signals: int
+    skipped_end_signals: int
+
+
+@dataclass(slots=True, frozen=True)
+class OrderBookBacktestOutcome:
+    result: BacktestResult
+    diagnostics: BacktestDiagnostics
 
 
 @dataclass(slots=True)
 class _OpenPosition:
-    entry_index: int
     exit_index: int
     entry_time: object
     entry_price: Decimal
@@ -50,35 +62,24 @@ class _OpenPosition:
 
 
 def feature_value(row: MarketFeatures, feature_name: str) -> float | None:
-    """Return a numeric feature value from a MarketFeatures row.
-
-    Unknown feature names raise early instead of quietly returning None and making
-    a strategy look like it responsibly decided not to trade. Computers love that
-    kind of passive-aggressive failure.
-    """
-
     if not hasattr(row, feature_name):
         raise ValueError(f"Unknown market feature: {feature_name}")
     value = getattr(row, feature_name)
-    if value is None:
-        return None
-    return float(value)
+    return None if value is None else float(value)
 
 
 def rows_with_feature(rows: list[MarketFeatures], feature_name: str) -> list[MarketFeatures]:
-    """Rows sorted by close_time where the requested feature is present."""
+    """Present observations, sorted, for threshold estimation only.
+
+    Do not pass this filtered list into the gap-safe backtester. Missing feature
+    values must remain in the price timeline so a one-bar horizon still means one
+    actual candle, not one arbitrary later observation.
+    """
 
     return sorted((row for row in rows if feature_value(row, feature_name) is not None), key=lambda row: row.close_time)
 
 
 def quantile_threshold(rows: list[MarketFeatures], feature_name: str, quantile: float) -> float:
-    """Nearest-rank quantile threshold for a feature.
-
-    The threshold is intended to be learned from train rows and reused for
-    validation/full runs. That prevents the classic "I optimized on the future"
-    backtest circus.
-    """
-
     if quantile <= 0 or quantile >= 1:
         raise ValueError("quantile must be between 0 and 1")
     values = sorted(value for row in rows if (value := feature_value(row, feature_name)) is not None)
@@ -89,7 +90,7 @@ def quantile_threshold(rows: list[MarketFeatures], feature_name: str, quantile: 
 
 
 def split_feature_rows(rows: list[MarketFeatures], *, train_ratio: Decimal) -> tuple[list[MarketFeatures], list[MarketFeatures]]:
-    """Chronological train/validation split for feature rows."""
+    """Chronological split preserving rows with missing feature values."""
 
     if train_ratio <= 0 or train_ratio >= 1:
         raise ValueError("train_ratio must be greater than 0 and smaller than 1")
@@ -100,7 +101,57 @@ def split_feature_rows(rows: list[MarketFeatures], *, train_ratio: Decimal) -> t
     return sorted_rows[:split_index], sorted_rows[split_index:]
 
 
-def run_order_book_threshold_backtest(
+def _expected_seconds(timeframe: str) -> int:
+    seconds = timeframe_to_seconds(timeframe)
+    if seconds <= 0:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+    return seconds
+
+
+def _gap_seconds(previous: MarketFeatures, current: MarketFeatures) -> float:
+    return max(0.0, (current.close_time - previous.close_time).total_seconds())
+
+
+def _is_contiguous(previous: MarketFeatures, current: MarketFeatures, *, timeframe: str) -> bool:
+    # Exact exchange candle timestamps should differ by the timeframe. One second
+    # tolerance protects against timestamp serialization quirks, not missing bars.
+    return abs(_gap_seconds(previous, current) - _expected_seconds(timeframe)) <= 1.0
+
+
+def continuity_diagnostics(rows: list[MarketFeatures], *, timeframe: str) -> tuple[int, float]:
+    ordered = sorted(rows, key=lambda row: row.close_time)
+    gaps = 0
+    max_gap = 0.0
+    for previous, current in zip(ordered, ordered[1:]):
+        seconds = _gap_seconds(previous, current)
+        max_gap = max(max_gap, seconds)
+        if not _is_contiguous(previous, current, timeframe=timeframe):
+            gaps += 1
+    return gaps, max_gap
+
+
+def _signal_matches(value: float, config: OrderBookThresholdConfig) -> bool:
+    if config.entry_tail == "high":
+        return value >= config.entry_threshold
+    if config.entry_tail == "low":
+        return value <= config.entry_threshold
+    raise ValueError("entry_tail must be 'high' or 'low'")
+
+
+def _can_complete_trade_path(rows: list[MarketFeatures], *, signal_index: int, horizon_bars: int, timeframe: str) -> str | None:
+    """Return a skip reason when next-candle entry plus fixed exit is unavailable."""
+
+    entry_index = signal_index + 1
+    exit_index = entry_index + horizon_bars
+    if exit_index >= len(rows):
+        return "end"
+    for index in range(signal_index, exit_index):
+        if not _is_contiguous(rows[index], rows[index + 1], timeframe=timeframe):
+            return "gap"
+    return None
+
+
+def run_order_book_threshold_backtest_with_diagnostics(
     *,
     rows: list[MarketFeatures],
     config: OrderBookThresholdConfig,
@@ -109,12 +160,12 @@ def run_order_book_threshold_backtest(
     quote_amount: Decimal,
     fee_rate_pct: Decimal = Decimal("0"),
     slippage_pct: Decimal = Decimal("0"),
-) -> BacktestResult:
-    """Run one fixed-horizon long threshold strategy on feature rows.
+) -> OrderBookBacktestOutcome:
+    """Gap-safe fixed-horizon long threshold backtest.
 
-    Feature row i triggers a BUY scheduled for row i+1. This is important: the
-    feature is known only after row i closes, so buying at the same row's close is
-    lookahead-ish optimism with nicer shoes.
+    A feature at row i may schedule an entry at i+1 only when every timestamp
+    through its planned exit is contiguous. Signals that would bridge a gap or
+    run beyond the available sample are explicitly skipped and reported.
     """
 
     if config.horizon_bars <= 0:
@@ -123,17 +174,19 @@ def run_order_book_threshold_backtest(
         raise ValueError("initial_quote_balance must be positive")
     if quote_amount <= 0:
         raise ValueError("quote_amount must be positive")
-    if fee_rate_pct < 0:
-        raise ValueError("fee_rate_pct cannot be negative")
-    if slippage_pct < 0:
-        raise ValueError("slippage_pct cannot be negative")
+    if fee_rate_pct < 0 or slippage_pct < 0:
+        raise ValueError("fee_rate_pct and slippage_pct cannot be negative")
 
-    sorted_rows = sorted(rows, key=lambda row: row.close_time)
-    if not sorted_rows:
-        return _empty_result(initial_quote_balance=initial_quote_balance)
+    ordered = sorted(rows, key=lambda row: row.close_time)
+    if not ordered:
+        return OrderBookBacktestOutcome(
+            result=_empty_result(initial_quote_balance=initial_quote_balance),
+            diagnostics=BacktestDiagnostics(0, 0, 0, 0.0, 0, 0, 0),
+        )
 
     fee_rate = fee_rate_pct / Decimal("100") if fee_rate_pct > 0 else Decimal("0")
     slippage_rate = slippage_pct / Decimal("100") if slippage_pct > 0 else Decimal("0")
+    gap_count, max_gap_seconds = continuity_diagnostics(ordered, timeframe=config.timeframe)
 
     quote_balance = initial_quote_balance
     realized_pnl = Decimal("0")
@@ -144,15 +197,19 @@ def run_order_book_threshold_backtest(
     equity_peak = initial_quote_balance
     max_drawdown = Decimal("0")
     scheduled_buy_index: int | None = None
+    scheduled_exit_index: int | None = None
     scheduled_reason = ""
     executed_orders = 0
+    signal_candidates = 0
+    skipped_gap_signals = 0
+    skipped_end_signals = 0
 
-    for index, row in enumerate(sorted_rows):
+    for index, row in enumerate(ordered):
         close_price = Decimal(str(row.close_price))
 
         if position is None and scheduled_buy_index == index:
             spend = _spend_amount(quote_balance=quote_balance, requested=quote_amount, fee_rate=fee_rate)
-            if spend > 0 and close_price > 0:
+            if spend > 0 and close_price > 0 and scheduled_exit_index is not None:
                 entry_price = close_price * (Decimal("1") + slippage_rate)
                 entry_fee = spend * fee_rate
                 quantity = spend / entry_price
@@ -161,19 +218,19 @@ def run_order_book_threshold_backtest(
                 total_fees += entry_fee
                 executed_orders += 1
                 position = _OpenPosition(
-                    entry_index=index,
-                    exit_index=min(index + config.horizon_bars, len(sorted_rows) - 1),
+                    exit_index=scheduled_exit_index,
                     entry_time=row.close_time,
                     entry_price=entry_price,
                     quantity=quantity,
                     quote_amount=spend,
                     entry_fee=entry_fee,
-                    entry_reason=scheduled_reason or f"{config.feature_name}>={config.entry_threshold}",
+                    entry_reason=scheduled_reason,
                 )
             scheduled_buy_index = None
+            scheduled_exit_index = None
             scheduled_reason = ""
 
-        if position is not None and index >= position.exit_index and index > position.entry_index:
+        if position is not None and index == position.exit_index:
             exit_price = close_price * (Decimal("1") - slippage_rate)
             gross_quote = position.quantity * exit_price
             exit_fee = gross_quote * fee_rate
@@ -198,33 +255,48 @@ def run_order_book_threshold_backtest(
                     exit_fee=exit_fee,
                     pnl=pnl,
                     entry_reason=position.entry_reason,
-                    exit_reason=f"fixed_horizon_{config.horizon_bars}_bars",
+                    exit_reason=f"gap_safe_fixed_horizon_{config.horizon_bars}_bars",
                 )
             )
             position = None
 
-        if position is None and scheduled_buy_index is None and index + 1 < len(sorted_rows):
+        if position is None and scheduled_buy_index is None:
             value = feature_value(row, config.feature_name)
-            if value is not None and value >= config.entry_threshold:
-                scheduled_buy_index = index + 1
-                scheduled_reason = f"{config.feature_name}={value:.6f} >= threshold={config.entry_threshold:.6f}"
+            if value is not None and _signal_matches(value, config):
+                signal_candidates += 1
+                reason = _can_complete_trade_path(
+                    ordered,
+                    signal_index=index,
+                    horizon_bars=config.horizon_bars,
+                    timeframe=config.timeframe,
+                )
+                if reason == "gap":
+                    skipped_gap_signals += 1
+                elif reason == "end":
+                    skipped_end_signals += 1
+                else:
+                    scheduled_buy_index = index + 1
+                    scheduled_exit_index = index + 1 + config.horizon_bars
+                    operator = ">=" if config.entry_tail == "high" else "<="
+                    scheduled_reason = (
+                        f"{config.feature_name}={value:.6f} {operator} threshold={config.entry_threshold:.6f}; "
+                        f"tail={config.entry_tail}"
+                    )
 
         current_equity = quote_balance + ((position.quantity * close_price) if position is not None else Decimal("0"))
         equity_curve.append(current_equity)
         if current_equity > equity_peak:
             equity_peak = current_equity
-        drawdown = equity_peak - current_equity
-        if drawdown > max_drawdown:
-            max_drawdown = drawdown
+        max_drawdown = max(max_drawdown, equity_peak - current_equity)
 
-    last_price = Decimal(str(sorted_rows[-1].close_price))
+    last_price = Decimal(str(ordered[-1].close_price))
     open_qty = position.quantity if position is not None else Decimal("0")
     open_avg = position.entry_price if position is not None else Decimal("0")
     unrealized_pnl = (last_price - open_avg) * open_qty if position is not None else Decimal("0")
     final_equity = quote_balance + (open_qty * last_price)
 
     metrics = BacktestMetrics(
-        candles_processed=len(sorted_rows),
+        candles_processed=len(ordered),
         executed_orders=executed_orders,
         round_trips=len(trades),
         winning_trades=sum(1 for trade in trades if trade.pnl > 0),
@@ -239,7 +311,22 @@ def run_order_book_threshold_backtest(
         open_position_avg_entry_price=open_avg,
         last_price=last_price,
     )
-    return BacktestResult(metrics=metrics, trades=trades, equity_curve=equity_curve)
+    diagnostics = BacktestDiagnostics(
+        total_rows=len(ordered),
+        feature_observations=len(rows_with_feature(ordered, config.feature_name)),
+        gap_count=gap_count,
+        max_gap_seconds=max_gap_seconds,
+        signal_candidates=signal_candidates,
+        skipped_gap_signals=skipped_gap_signals,
+        skipped_end_signals=skipped_end_signals,
+    )
+    return OrderBookBacktestOutcome(result=BacktestResult(metrics=metrics, trades=trades, equity_curve=equity_curve), diagnostics=diagnostics)
+
+
+def run_order_book_threshold_backtest(**kwargs: object) -> BacktestResult:
+    """Compatibility wrapper for callers that only need the result."""
+
+    return run_order_book_threshold_backtest_with_diagnostics(**kwargs).result  # type: ignore[arg-type]
 
 
 def buy_and_hold_feature_rows(
@@ -251,17 +338,14 @@ def buy_and_hold_feature_rows(
     fee_rate_pct: Decimal = Decimal("0"),
     slippage_pct: Decimal = Decimal("0"),
 ) -> BacktestResult:
-    """Order-sized buy-and-hold benchmark over the same feature-row window."""
-
-    sorted_rows = sorted(rows, key=lambda row: row.close_time)
-    if not sorted_rows:
+    ordered = sorted(rows, key=lambda row: row.close_time)
+    if not ordered:
         return _empty_result(initial_quote_balance=initial_quote_balance)
 
     fee_rate = fee_rate_pct / Decimal("100") if fee_rate_pct > 0 else Decimal("0")
     slippage_rate = slippage_pct / Decimal("100") if slippage_pct > 0 else Decimal("0")
     spend = _spend_amount(quote_balance=initial_quote_balance, requested=quote_amount, fee_rate=fee_rate)
-    first = sorted_rows[0]
-    last = sorted_rows[-1]
+    first, last = ordered[0], ordered[-1]
     entry_price = Decimal(str(first.close_price)) * (Decimal("1") + slippage_rate)
     last_price = Decimal(str(last.close_price))
     entry_fee = spend * fee_rate
@@ -269,24 +353,14 @@ def buy_and_hold_feature_rows(
     quote_balance = initial_quote_balance - spend - entry_fee
     final_equity = quote_balance + (quantity * last_price)
     unrealized = (last_price - entry_price) * quantity
-    equity_curve = [quote_balance + (quantity * Decimal(str(row.close_price))) for row in sorted_rows]
+    equity_curve = [quote_balance + (quantity * Decimal(str(row.close_price))) for row in ordered]
     max_drawdown = _absolute_max_drawdown(equity_curve, initial_quote_balance)
-
     metrics = BacktestMetrics(
-        candles_processed=len(sorted_rows),
-        executed_orders=1 if quantity > 0 else 0,
-        round_trips=0,
-        winning_trades=0,
-        losing_trades=0,
-        realized_pnl=-entry_fee,
-        unrealized_pnl=unrealized,
-        total_fees=entry_fee,
-        max_drawdown=max_drawdown,
-        initial_equity=initial_quote_balance,
-        final_equity=final_equity,
-        open_position_quantity=quantity,
-        open_position_avg_entry_price=entry_price,
-        last_price=last_price,
+        candles_processed=len(ordered), executed_orders=1 if quantity > 0 else 0, round_trips=0,
+        winning_trades=0, losing_trades=0, realized_pnl=-entry_fee, unrealized_pnl=unrealized,
+        total_fees=entry_fee, max_drawdown=max_drawdown, initial_equity=initial_quote_balance,
+        final_equity=final_equity, open_position_quantity=quantity,
+        open_position_avg_entry_price=entry_price, last_price=last_price,
     )
     return BacktestResult(metrics=metrics, trades=[], equity_curve=equity_curve)
 
@@ -298,20 +372,11 @@ def _spend_amount(*, quote_balance: Decimal, requested: Decimal, fee_rate: Decim
 
 def _empty_result(*, initial_quote_balance: Decimal) -> BacktestResult:
     metrics = BacktestMetrics(
-        candles_processed=0,
-        executed_orders=0,
-        round_trips=0,
-        winning_trades=0,
-        losing_trades=0,
-        realized_pnl=Decimal("0"),
-        unrealized_pnl=Decimal("0"),
-        total_fees=Decimal("0"),
-        max_drawdown=Decimal("0"),
-        initial_equity=initial_quote_balance,
-        final_equity=initial_quote_balance,
-        open_position_quantity=Decimal("0"),
-        open_position_avg_entry_price=Decimal("0"),
-        last_price=None,
+        candles_processed=0, executed_orders=0, round_trips=0, winning_trades=0, losing_trades=0,
+        realized_pnl=Decimal("0"), unrealized_pnl=Decimal("0"), total_fees=Decimal("0"),
+        max_drawdown=Decimal("0"), initial_equity=initial_quote_balance,
+        final_equity=initial_quote_balance, open_position_quantity=Decimal("0"),
+        open_position_avg_entry_price=Decimal("0"), last_price=None,
     )
     return BacktestResult(metrics=metrics, trades=[], equity_curve=[])
 
@@ -322,9 +387,6 @@ def _absolute_max_drawdown(equity_curve: list[Decimal], fallback_peak: Decimal) 
     peak = max(fallback_peak, equity_curve[0])
     max_drawdown = Decimal("0")
     for equity in equity_curve:
-        if equity > peak:
-            peak = equity
-        drawdown = peak - equity
-        if drawdown > max_drawdown:
-            max_drawdown = drawdown
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
     return max_drawdown
